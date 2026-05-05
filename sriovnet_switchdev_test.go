@@ -74,19 +74,11 @@ func setUpRepPhysFiles(rep *repContext) error {
 
 // setUpRepresentorLayout sets up the representor filesystem layout.
 // Note: should not be called directly as it expects FakeFs to be initialized beforehand.
-func setUpRepresentorLayout(vfPciAddress string, rep *repContext) error {
+func setUpRepresentorLayout(rep *repContext) error {
 	// This method assumes FakeFs it already set up
 	_, ok := utilfs.Fs.(*utilfs.FakeFs)
 	if !ok {
 		return fmt.Errorf("fakeFs was not initialized")
-	}
-
-	if vfPciAddress != "" {
-		path := filepath.Join(PciSysDir, vfPciAddress, "physfn", "net", rep.Name)
-		err := utilfs.Fs.MkdirAll(path, os.FileMode(0755))
-		if err != nil {
-			return err
-		}
 	}
 
 	path := filepath.Join(NetSysDir, rep.Name)
@@ -101,22 +93,59 @@ func setUpRepresentorLayout(vfPciAddress string, rep *repContext) error {
 // setupUplinkRepresentorEnv sets up the uplink representor and related VF representors filesystem layout.
 //
 //nolint:unparam
-func setupUplinkRepresentorEnv(t *testing.T, uplink *repContext, vfPciAddress string, vfReps []*repContext) func() {
+func setupUplinkRepresentorEnv(t *testing.T, uplink *repContext, pfPciAddress string, vfPciAddress string, reps []*repContext) func() {
 	var err error
-	teardown := setupRepresentorEnv(t, vfPciAddress, vfReps)
+	teardown := setupFakeFs(t)
+
 	defer func() {
 		if err != nil {
 			teardown()
-			t.Errorf("setupUplinkRepresentorEnv, got %v", err)
+			t.Errorf("setupUplinkRepresentorEnv: %v", err)
 		}
 	}()
 
-	// Setup uplink
+	if err = utilfs.Fs.MkdirAll(NetSysDir, os.FileMode(0755)); err != nil {
+		return teardown
+	}
+	if err = utilfs.Fs.MkdirAll(PciSysDir, os.FileMode(0755)); err != nil {
+		return teardown
+	}
+
+	// For a VF, create a symlink file named physfn to link with the parent PF device.
+	if vfPciAddress != "" {
+		if err = utilfs.Fs.MkdirAll(filepath.Join(PciSysDir, pfPciAddress), os.FileMode(0755)); err != nil {
+			return teardown
+		}
+		if err = utilfs.Fs.MkdirAll(filepath.Join(PciSysDir, vfPciAddress), os.FileMode(0755)); err != nil {
+			return teardown
+		}
+		if err = utilfs.Fs.Symlink(
+			filepath.Join(PciSysDir, pfPciAddress),
+			filepath.Join(PciSysDir, vfPciAddress, "physfn")); err != nil {
+			return teardown
+		}
+	}
+
+	// setupRep creates the entry under the PF's net directory (for sysfs ReadDir) and
+	// the /sys/class/net entry (for isSwitchdev / getNetDevPhysPortName).
+	setupRep := func(rep *repContext) error {
+		if err := utilfs.Fs.MkdirAll(filepath.Join(PciSysDir, pfPciAddress, "net", rep.Name), os.FileMode(0755)); err != nil {
+			return err
+		}
+		if err := utilfs.Fs.MkdirAll(filepath.Join(NetSysDir, rep.Name), os.FileMode(0755)); err != nil {
+			return err
+		}
+		return setUpRepPhysFiles(rep)
+	}
+
 	if uplink != nil {
-		err = setUpRepresentorLayout(vfPciAddress, uplink)
-		if err != nil {
-			teardown()
-			t.Errorf("setupUplinkRepresentorEnv, got %v", err)
+		if err = setupRep(uplink); err != nil {
+			return teardown
+		}
+	}
+	for _, rep := range reps {
+		if err = setupRep(rep); err != nil {
+			return teardown
 		}
 	}
 
@@ -124,7 +153,7 @@ func setupUplinkRepresentorEnv(t *testing.T, uplink *repContext, vfPciAddress st
 }
 
 // setupRepresentorEnv sets up VF representors filesystem layout.
-func setupRepresentorEnv(t *testing.T, vfPciAddress string, vfReps []*repContext) func() {
+func setupRepresentorEnv(t *testing.T, vfReps []*repContext) func() {
 	var err error
 	teardown := setupFakeFs(t)
 
@@ -136,7 +165,7 @@ func setupRepresentorEnv(t *testing.T, vfPciAddress string, vfReps []*repContext
 	}()
 
 	for _, rep := range vfReps {
-		err = setUpRepresentorLayout(vfPciAddress, rep)
+		err = setUpRepresentorLayout(rep)
 		if err != nil {
 			t.Errorf("setupRepresentorEnv, got %v", err)
 		}
@@ -433,8 +462,12 @@ func TestGetVfRepresentor(t *testing.T) {
 }
 
 func TestGetUplinkRepresentorWithPhysPortName(t *testing.T) {
+	// pfPciAddress is the PF PCI address used for all VF test cases.
+	const pfPciAddress = "0000:03:00.0"
+
 	tcases := []struct {
 		name                 string
+		pfPciAddress         string
 		vfPciAddress         string
 		uplinkRep            *repContext
 		vfReps               []*repContext
@@ -443,6 +476,7 @@ func TestGetUplinkRepresentorWithPhysPortName(t *testing.T) {
 	}{
 		{
 			name:         "uplink representor exists",
+			pfPciAddress: pfPciAddress,
 			vfPciAddress: "0000:03:00.4",
 			uplinkRep:    &repContext{Name: "eth0", PhysPortName: "p0", PhysSwitchID: "111111"},
 			vfReps: []*repContext{
@@ -454,7 +488,8 @@ func TestGetUplinkRepresentorWithPhysPortName(t *testing.T) {
 		},
 		{
 			name:                 "uplink representor exists with PF instead of VF",
-			vfPciAddress:         "0000:03:00.0",
+			pfPciAddress:         pfPciAddress,
+			vfPciAddress:         "",
 			uplinkRep:            &repContext{Name: "eth0", PhysPortName: "p0", PhysSwitchID: "111111"},
 			vfReps:               []*repContext{},
 			expectedUplinkNetdev: "eth0",
@@ -462,6 +497,7 @@ func TestGetUplinkRepresentorWithPhysPortName(t *testing.T) {
 		},
 		{
 			name:         "uplink representor does not exist",
+			pfPciAddress: pfPciAddress,
 			vfPciAddress: "0000:03:00.4",
 			uplinkRep:    &repContext{Name: "eth0", PhysPortName: "", PhysSwitchID: ""},
 			vfReps: []*repContext{
@@ -473,6 +509,7 @@ func TestGetUplinkRepresentorWithPhysPortName(t *testing.T) {
 		},
 		{
 			name:         "uplink representor missing switch id",
+			pfPciAddress: pfPciAddress,
 			vfPciAddress: "0000:03:00.4",
 			uplinkRep:    &repContext{Name: "eth0", PhysPortName: "p0", PhysSwitchID: ""},
 			vfReps: []*repContext{
@@ -484,6 +521,7 @@ func TestGetUplinkRepresentorWithPhysPortName(t *testing.T) {
 		},
 		{
 			name:                 "no representors",
+			pfPciAddress:         pfPciAddress,
 			vfPciAddress:         "0000:03:00.4",
 			uplinkRep:            &repContext{Name: "eth0", PhysPortName: "", PhysSwitchID: ""},
 			vfReps:               []*repContext{},
@@ -492,6 +530,7 @@ func TestGetUplinkRepresentorWithPhysPortName(t *testing.T) {
 		},
 		{
 			name:                 "missing uplink",
+			pfPciAddress:         pfPciAddress,
 			vfPciAddress:         "0000:03:00.4",
 			uplinkRep:            nil,
 			vfReps:               []*repContext{},
@@ -502,10 +541,23 @@ func TestGetUplinkRepresentorWithPhysPortName(t *testing.T) {
 
 	for _, tcase := range tcases {
 		t.Run(tcase.name, func(t *testing.T) {
-			teardown := setupUplinkRepresentorEnv(t, tcase.uplinkRep, tcase.vfPciAddress, tcase.vfReps)
+			// mock netlink calls, trigger failure to fallback to sysfs
+			nlOpsMock := netlinkopsMocks.NewMockNetlinkOps(t)
+			netlinkops.SetNetlinkOps(nlOpsMock)
+			defer netlinkops.ResetNetlinkOps()
+			nlOpsMock.On("DevLinkGetAllPortList").Return(
+				nil, fmt.Errorf("devlink not available")).Maybe()
+
+			teardown := setupUplinkRepresentorEnv(t, tcase.uplinkRep, tcase.pfPciAddress, tcase.vfPciAddress, tcase.vfReps)
 			defer teardown()
 
-			uplinkNetdev, err := GetUplinkRepresentor(tcase.vfPciAddress)
+			// query with the VF address when provided, otherwise the PF address.
+			queryAddr := tcase.vfPciAddress
+			if queryAddr == "" {
+				queryAddr = tcase.pfPciAddress
+			}
+
+			uplinkNetdev, err := GetUplinkRepresentor(queryAddr)
 			if tcase.shouldFail {
 				assert.Error(t, err)
 			} else {
@@ -520,11 +572,15 @@ func TestGetUplinkRepresentorForPfSuccess(t *testing.T) {
 	pfPciAddress := "0000:03:00.0"
 	uplinkRep := &repContext{Name: "eth0", PhysPortName: "p0", PhysSwitchID: "111111"}
 
-	vfPciAddress := ""
-	var vfsReps []*repContext
+	// mock netlink calls, trigger failure to fallback to sysfs
+	nlOpsMock := netlinkopsMocks.NewMockNetlinkOps(t)
+	netlinkops.SetNetlinkOps(nlOpsMock)
+	defer netlinkops.ResetNetlinkOps()
+	nlOpsMock.On("DevLinkGetAllPortList").Return(
+		nil, fmt.Errorf("devlink not available")).Maybe()
 
-	teardown := setupUplinkRepresentorEnv(t, uplinkRep, vfPciAddress, vfsReps)
-	_ = utilfs.Fs.MkdirAll(filepath.Join(PciSysDir, pfPciAddress, "net", uplinkRep.Name), os.FileMode(0755))
+	// vfPciAddress is empty → PF case: no physfn symlink, net dir created under pfPciAddress.
+	teardown := setupUplinkRepresentorEnv(t, uplinkRep, pfPciAddress, "", nil)
 	defer teardown()
 	uplinkNetdev, err := GetUplinkRepresentor(pfPciAddress)
 	assert.NoError(t, err)
@@ -533,17 +589,26 @@ func TestGetUplinkRepresentorForPfSuccess(t *testing.T) {
 
 func TestGetUplinkRepresentorErrorEmptySwID(t *testing.T) {
 	var testErr error
+	pfPciAddress := "0000:03:00.0"
 	vfPciAddress := "0000:03:00.4"
 	uplinkRep := &repContext{Name: "eth0", PhysPortName: "", PhysSwitchID: ""}
-	var vfsReps []*repContext
 	expectedError := fmt.Sprintf("uplink for %s not found", vfPciAddress)
-	teardown := setupUplinkRepresentorEnv(t, uplinkRep, vfPciAddress, vfsReps)
+
+	// mock netlink calls, trigger failure to fallback to sysfs
+	nlOpsMock := netlinkopsMocks.NewMockNetlinkOps(t)
+	netlinkops.SetNetlinkOps(nlOpsMock)
+	defer netlinkops.ResetNetlinkOps()
+	nlOpsMock.On("DevLinkGetAllPortList").Return(
+		nil, fmt.Errorf("devlink not available")).Maybe()
+
+	teardown := setupUplinkRepresentorEnv(t, uplinkRep, pfPciAddress, vfPciAddress, nil)
 	defer teardown()
+	// Overwrite the phys_switch_id file with an empty value to simulate a non-switchdev uplink.
 	swIDFile := filepath.Join(NetSysDir, "eth0", netdevPhysSwitchID)
 	swID, testErr := utilfs.Fs.Create(swIDFile)
 	defer func() {
 		if testErr != nil {
-			t.Errorf("setupUplinkRepresentorEnv, got %v", testErr)
+			t.Errorf("TestGetUplinkRepresentorErrorEmptySwID: %v", testErr)
 		}
 	}()
 	_, testErr = swID.Write([]byte(""))
@@ -551,6 +616,102 @@ func TestGetUplinkRepresentorErrorEmptySwID(t *testing.T) {
 	assert.Error(t, err)
 	assert.Equal(t, "", uplinkNetdev)
 	assert.Equal(t, expectedError, err.Error())
+}
+
+func TestGetUplinkRepresentorDevlink(t *testing.T) {
+	const pfPciAddress = "0000:03:00.0"
+
+	uplinkRep := &repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "aabbcc"}
+
+	devlinkPhysicalPort := &netlink.DevlinkPort{
+		NetdeviceName:    "p0",
+		PortFlavour:      uint16(PORT_FLAVOUR_PHYSICAL),
+		ControllerNumber: ptrTo(uint32(0)),
+		PortNumber:       ptrTo(uint32(0)),
+	}
+	devlinkNonPhysicalPort := &netlink.DevlinkPort{
+		NetdeviceName:    "pf0hpf",
+		PortFlavour:      uint16(PORT_FLAVOUR_PCI_PF),
+		ControllerNumber: ptrTo(uint32(0)),
+		PortNumber:       ptrTo(uint32(0)),
+	}
+
+	devlinkPhysicalPortNoNetdev := &netlink.DevlinkPort{
+		NetdeviceName:    "",
+		PortFlavour:      uint16(PORT_FLAVOUR_PHYSICAL),
+		ControllerNumber: ptrTo(uint32(0)),
+		PortNumber:       ptrTo(uint32(0)),
+	}
+
+	tcases := []struct {
+		name                 string
+		vfPciAddress         string
+		uplinkRep            *repContext
+		devlinkPorts         []*netlink.DevlinkPort
+		devlinkPortsErr      error
+		expectedUplinkNetdev string
+	}{
+		{
+			name:                 "returns uplink from devlink for PF",
+			vfPciAddress:         "",
+			uplinkRep:            uplinkRep,
+			devlinkPorts:         []*netlink.DevlinkPort{devlinkPhysicalPort},
+			expectedUplinkNetdev: "p0",
+		},
+		{
+			// physfn symlink is created by setupUplinkRepresentorEnv for the VF case.
+			name:                 "returns uplink from devlink for VF",
+			vfPciAddress:         "0000:03:00.4",
+			uplinkRep:            uplinkRep,
+			devlinkPorts:         []*netlink.DevlinkPort{devlinkPhysicalPort},
+			expectedUplinkNetdev: "p0",
+		},
+		{
+			name:                 "falls back to sysfs when devlink port lookup fails",
+			vfPciAddress:         "",
+			uplinkRep:            uplinkRep,
+			devlinkPortsErr:      fmt.Errorf("devlink port not available"),
+			expectedUplinkNetdev: "p0",
+		},
+		{
+			// only a non-physical port is reported, so candidateNetdevs is empty.
+			name:                 "falls back to sysfs when devlink physical port not found",
+			vfPciAddress:         "",
+			uplinkRep:            uplinkRep,
+			devlinkPorts:         []*netlink.DevlinkPort{devlinkNonPhysicalPort},
+			expectedUplinkNetdev: "p0",
+		},
+		{
+			name:                 "falls back to sysfs when devlink port has no netdev name",
+			vfPciAddress:         "",
+			uplinkRep:            uplinkRep,
+			devlinkPorts:         []*netlink.DevlinkPort{devlinkPhysicalPortNoNetdev},
+			expectedUplinkNetdev: "p0",
+		},
+	}
+
+	for _, tcase := range tcases {
+		t.Run(tcase.name, func(t *testing.T) {
+			teardown := setupUplinkRepresentorEnv(t, tcase.uplinkRep, pfPciAddress, tcase.vfPciAddress, nil)
+			defer teardown()
+
+			nlOpsMock := netlinkopsMocks.NewMockNetlinkOps(t)
+			netlinkops.SetNetlinkOps(nlOpsMock)
+			defer netlinkops.ResetNetlinkOps()
+
+			nlOpsMock.On("DevLinkGetAllPortList").Return(tcase.devlinkPorts, tcase.devlinkPortsErr)
+
+			// query with the VF address when provided, otherwise the PF address.
+			queryAddr := tcase.vfPciAddress
+			if queryAddr == "" {
+				queryAddr = pfPciAddress
+			}
+
+			uplink, err := GetUplinkRepresentor(queryAddr)
+			assert.NoError(t, err)
+			assert.Equal(t, tcase.expectedUplinkNetdev, uplink)
+		})
+	}
 }
 
 func TestGetVfRepresentorDPU(t *testing.T) {
@@ -639,7 +800,7 @@ func TestGetVfRepresentorDPU(t *testing.T) {
 
 	for _, tcase := range tcases {
 		t.Run(tcase.name, func(t *testing.T) {
-			teardown := setupRepresentorEnv(t, "", tcase.vfReps)
+			teardown := setupRepresentorEnv(t, tcase.vfReps)
 			defer teardown()
 			vfRep, err := GetVfRepresentorDPU(tcase.pfID, tcase.vfID)
 			if tcase.shouldFail {
@@ -719,7 +880,7 @@ func TestGetPfRepresentorDPU(t *testing.T) {
 
 	for _, tcase := range tcases {
 		t.Run(tcase.name, func(t *testing.T) {
-			teardown := setupRepresentorEnv(t, "", tcase.pfReps)
+			teardown := setupRepresentorEnv(t, tcase.pfReps)
 			defer teardown()
 			pfRep, err := GetPfRepresentorDPU(tcase.pfID)
 			if tcase.shouldFail {
@@ -999,7 +1160,7 @@ func TestGetPortIndexFromRepresentor(t *testing.T) {
 
 	for _, tcase := range tcases {
 		t.Run(tcase.name, func(t *testing.T) {
-			teardown := setupRepresentorEnv(t, "", tcase.reps)
+			teardown := setupRepresentorEnv(t, tcase.reps)
 			defer teardown()
 
 			nlOpsMock := netlinkopsMocks.NewMockNetlinkOps(t)
@@ -1105,7 +1266,7 @@ func TestGetSfRepresentorDPU(t *testing.T) {
 
 	for _, tcase := range tcases {
 		t.Run(tcase.name, func(t *testing.T) {
-			teardown := setupRepresentorEnv(t, "", tcase.vfReps)
+			teardown := setupRepresentorEnv(t, tcase.vfReps)
 			defer teardown()
 			vfRep, err := GetSfRepresentorDPU(tcase.pfID, tcase.sfID)
 			if tcase.shouldFail {
@@ -1200,7 +1361,7 @@ func TestGetVfRepresentorPortFlavour(t *testing.T) {
 
 	for _, tcase := range tcases {
 		t.Run(tcase.name, func(t *testing.T) {
-			teardown := setupRepresentorEnv(t, "", []*repContext{&tcase.rep})
+			teardown := setupRepresentorEnv(t, []*repContext{&tcase.rep})
 			defer teardown()
 
 			nlOpsMock := netlinkopsMocks.NewMockNetlinkOps(t)
@@ -1226,7 +1387,7 @@ func TestGetVfRepresentorPortFlavourDevlink(t *testing.T) {
 	netlinkops.SetNetlinkOps(nlOpsMock)
 	defer netlinkops.ResetNetlinkOps()
 
-	teardown := setupRepresentorEnv(t, "", []*repContext{{
+	teardown := setupRepresentorEnv(t, []*repContext{{
 		Name:         "enp3s0f0_0",
 		PhysPortName: "pf0vf0",
 		PhysSwitchID: "c2cfc60003a1420c",
@@ -1259,7 +1420,7 @@ func TestGetRepresentorPeerMacAddress(t *testing.T) {
 		{Name: "pf0sf5", PhysPortName: "pf0sf5", PhysSwitchID: "c2cfc60003a1420c"},
 		{Name: "pf0sf10", PhysPortName: "c1pf0sf10", PhysSwitchID: "c2cfc60003a1420c"},
 	}
-	teardown := setupRepresentorEnv(t, "", vfReps)
+	teardown := setupRepresentorEnv(t, vfReps)
 	defer teardown()
 	defer netlinkops.ResetNetlinkOps()
 
@@ -1309,7 +1470,7 @@ func TestGetRepresentorPeerMacAddressDevlink(t *testing.T) {
 	netlinkops.SetNetlinkOps(nlOpsMock)
 	defer netlinkops.ResetNetlinkOps()
 
-	teardown := setupRepresentorEnv(t, "", []*repContext{{
+	teardown := setupRepresentorEnv(t, []*repContext{{
 		Name:         "pf0hpf",
 		PhysPortName: "pf0",
 		PhysSwitchID: "c2cfc60003a1420c",
@@ -1388,7 +1549,7 @@ func TestSetRepresentorPeerMacAddress(t *testing.T) {
 
 	for _, tcase := range tcases {
 		t.Run(tcase.name, func(t *testing.T) {
-			teardown := setupRepresentorEnv(t, "", tcase.reps)
+			teardown := setupRepresentorEnv(t, tcase.reps)
 			defer teardown()
 
 			nlOpsMock := netlinkopsMocks.NewMockNetlinkOps(t)

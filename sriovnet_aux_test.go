@@ -17,6 +17,7 @@ limitations under the License.
 package sriovnet
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -24,6 +25,8 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	utilfs "github.com/k8snetworkplumbingwg/sriovnet/pkg/utils/filesystem"
+	"github.com/k8snetworkplumbingwg/sriovnet/pkg/utils/netlinkops"
+	netlinkopsMocks "github.com/k8snetworkplumbingwg/sriovnet/pkg/utils/netlinkops/mocks"
 )
 
 type auxDevContext struct {
@@ -177,25 +180,30 @@ func TestGetPfPciFromAuxNoSuchDevice(t *testing.T) {
 }
 
 func TestGetUplinkRepresentorFromAux(t *testing.T) {
-	teardownFs := setupFakeFs(t)
-	defer teardownFs()
 	// Create PCI & Auxiliary sysfs layout with FakeFs
 	pfPciAddr := "0000:02:00.0"
 	auxDevName := "mlx5_core.eth.0"
-	auxDevPath := filepath.Join(PciSysDir, pfPciAddr, auxDevName)
-	auxDevLink := filepath.Join(AuxSysDir, auxDevName)
 
 	uplinkRep := &repContext{"eth0", "p0", "111111"}
 	sfsReps := []*repContext{{"enp_0", "pf0sf0", "0123"}}
 
-	teardownUplink := setupUplinkRepresentorEnv(t, uplinkRep, pfPciAddr, sfsReps)
+	// mock netlink calls, trigger failure to fallback to sysfs
+	nlOpsMock := netlinkopsMocks.NewMockNetlinkOps(t)
+	netlinkops.SetNetlinkOps(nlOpsMock)
+	defer netlinkops.ResetNetlinkOps()
+	nlOpsMock.On("DevLinkGetAllPortList").Return(
+		nil, fmt.Errorf("devlink not available")).Maybe()
+
+	// pfPciAddr is the PF address; vfPciAddress is empty (PF case) — no physfn symlink created.
+	teardownUplink := setupUplinkRepresentorEnv(t, uplinkRep, pfPciAddr, "", sfsReps)
 	defer teardownUplink()
 
-	// PF PCI path and auxiliary device dir
+	// PF PCI path and auxiliary device dir (PciSysDir/pfAddr already created by setupUplinkRepresentorEnv)
+	auxDevPath := filepath.Join(PciSysDir, pfPciAddr, auxDevName)
 	_ = utilfs.Fs.MkdirAll(auxDevPath, os.FileMode(0755))
 	_ = utilfs.Fs.MkdirAll(AuxSysDir, os.FileMode(0755))
 	// Auxiliary device link
-	_ = utilfs.Fs.Symlink(auxDevPath, auxDevLink)
+	_ = utilfs.Fs.Symlink(auxDevPath, filepath.Join(AuxSysDir, auxDevName))
 
 	pf, err := GetUplinkRepresentorFromAux(auxDevName)
 	assert.NoError(t, err)
