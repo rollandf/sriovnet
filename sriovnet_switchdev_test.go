@@ -1270,6 +1270,11 @@ MaxTxRate  : 0
 State      : Follow
 `
 	setupDPUConfigFileForPort(t, "p0", "pf", repConfigFile)
+
+	// The uplink "p0" is now searched in the parent device net dir of "pf0hpf"
+	err := utilfs.Fs.MkdirAll(filepath.Join(NetSysDir, "pf0hpf", "device", "net", "p0"), os.FileMode(0755))
+	assert.NoError(t, err)
+
 	// Run test
 	tcases := []struct {
 		name        string
@@ -1406,6 +1411,16 @@ func TestSetRepresentorPeerMacAddress(t *testing.T) {
 			_, err := utilfs.Fs.Create(macFile)
 			assert.NoError(t, err)
 
+			// Create parent device net dir so the uplink can be found via the sysfs fallback path
+			parentNetDir := filepath.Join(NetSysDir, tcase.netdev, "device", "net")
+			err = utilfs.Fs.MkdirAll(parentNetDir, os.FileMode(0755))
+			assert.NoError(t, err)
+			// create representors in the parent net dir
+			for _, rep := range tcase.reps {
+				err = utilfs.Fs.MkdirAll(filepath.Join(parentNetDir, rep.Name), os.FileMode(0755))
+				assert.NoError(t, err)
+			}
+
 			// execute test
 			err = SetRepresentorPeerMacAddress(tcase.netdev, mac)
 			if tcase.shouldFail {
@@ -1416,6 +1431,98 @@ func TestSetRepresentorPeerMacAddress(t *testing.T) {
 				content, err := utilfs.Fs.ReadFile(macFile)
 				assert.NoError(t, err)
 				assert.Equal(t, mac.String(), string(content))
+			}
+		})
+	}
+}
+
+func TestSetRepresentorPeerMacAddressDevlink(t *testing.T) {
+	mac := net.HardwareAddr{0, 0, 0, 1, 2, 3}
+
+	dlport := &netlink.DevlinkPort{
+		BusName:     "pci",
+		DeviceName:  "0000:03:00.0",
+		PortIndex:   1,
+		PortFlavour: uint16(PORT_FLAVOUR_PCI_VF),
+	}
+
+	fnAttrs := netlink.DevlinkPortFnSetAttrs{
+		FnAttrs:     netlink.DevlinkPortFn{HwAddr: mac},
+		HwAddrValid: true,
+	}
+
+	tcases := []struct {
+		name            string
+		netdev          string
+		reps            []*repContext
+		macFile         string // sysfs mac file path to create; empty means no sysfs setup
+		devlinkFnSetErr error
+		expectedMac     string
+		shouldFail      bool
+	}{
+		{
+			name:   "devlink set succeeds",
+			netdev: "pf0vf5",
+			reps: []*repContext{
+				{Name: "pf0vf5", PhysPortName: "pf0vf5", PhysSwitchID: "c2cfc60003a1420c"},
+			},
+			macFile:         "",
+			devlinkFnSetErr: nil,
+			shouldFail:      false,
+		},
+		{
+			name:   "devlink set fails fallback to sysfs",
+			netdev: "pf0vf5",
+			reps: []*repContext{
+				{Name: "pf0vf5", PhysPortName: "pf0vf5", PhysSwitchID: "c2cfc60003a1420c"},
+				{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
+			},
+			macFile:         filepath.Join(NetSysDir, "p0", "smart_nic", "vf5", "mac"),
+			devlinkFnSetErr: fmt.Errorf("devlink set failed"),
+			expectedMac:     mac.String(),
+			shouldFail:      false,
+		},
+	}
+
+	for _, tcase := range tcases {
+		t.Run(tcase.name, func(t *testing.T) {
+			teardown := setupRepresentorEnv(t, "", tcase.reps)
+			defer teardown()
+
+			nlOpsMock := netlinkopsMocks.NewMockNetlinkOps(t)
+			netlinkops.SetNetlinkOps(nlOpsMock)
+			defer netlinkops.ResetNetlinkOps()
+
+			if tcase.macFile != "" {
+				// setup sysfs mac file and parent device net dir for uplink lookup
+				err := utilfs.Fs.MkdirAll(filepath.Dir(tcase.macFile), os.FileMode(0755))
+				assert.NoError(t, err)
+				_, err = utilfs.Fs.Create(tcase.macFile)
+				assert.NoError(t, err)
+
+				parentNetDir := filepath.Join(NetSysDir, tcase.netdev, "device", "net")
+				err = utilfs.Fs.MkdirAll(parentNetDir, os.FileMode(0755))
+				assert.NoError(t, err)
+				for _, rep := range tcase.reps {
+					err = utilfs.Fs.MkdirAll(filepath.Join(parentNetDir, rep.Name), os.FileMode(0755))
+					assert.NoError(t, err)
+				}
+			}
+
+			nlOpsMock.On("DevLinkGetPortByNetdevName", tcase.netdev).Return(dlport, nil)
+			nlOpsMock.On("DevLinkPortFnSet", dlport.BusName, dlport.DeviceName, dlport.PortIndex, fnAttrs).
+				Return(tcase.devlinkFnSetErr)
+
+			err := SetRepresentorPeerMacAddress(tcase.netdev, mac)
+			if tcase.shouldFail {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				if tcase.macFile != "" {
+					content, err := utilfs.Fs.ReadFile(tcase.macFile)
+					assert.NoError(t, err)
+					assert.Equal(t, tcase.expectedMac, string(content))
+				}
 			}
 		})
 	}

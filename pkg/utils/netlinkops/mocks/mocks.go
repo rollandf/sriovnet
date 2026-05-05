@@ -223,6 +223,75 @@ func (_c *MockNetlinkOps_DevLinkGetPortByNetdevName_Call) RunAndReturn(run func(
 	return _c
 }
 
+// DevLinkPortFnSet provides a mock function for the type MockNetlinkOps
+func (_mock *MockNetlinkOps) DevLinkPortFnSet(busName string, deviceName string, portIndex uint32, fnAttrs netlink.DevlinkPortFnSetAttrs) error {
+	ret := _mock.Called(busName, deviceName, portIndex, fnAttrs)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DevLinkPortFnSet")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(string, string, uint32, netlink.DevlinkPortFnSetAttrs) error); ok {
+		r0 = returnFunc(busName, deviceName, portIndex, fnAttrs)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockNetlinkOps_DevLinkPortFnSet_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DevLinkPortFnSet'
+type MockNetlinkOps_DevLinkPortFnSet_Call struct {
+	*mock.Call
+}
+
+// DevLinkPortFnSet is a helper method to define mock.On call
+//   - busName string
+//   - deviceName string
+//   - portIndex uint32
+//   - fnAttrs netlink.DevlinkPortFnSetAttrs
+func (_e *MockNetlinkOps_Expecter) DevLinkPortFnSet(busName interface{}, deviceName interface{}, portIndex interface{}, fnAttrs interface{}) *MockNetlinkOps_DevLinkPortFnSet_Call {
+	return &MockNetlinkOps_DevLinkPortFnSet_Call{Call: _e.mock.On("DevLinkPortFnSet", busName, deviceName, portIndex, fnAttrs)}
+}
+
+func (_c *MockNetlinkOps_DevLinkPortFnSet_Call) Run(run func(busName string, deviceName string, portIndex uint32, fnAttrs netlink.DevlinkPortFnSetAttrs)) *MockNetlinkOps_DevLinkPortFnSet_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 string
+		if args[0] != nil {
+			arg0 = args[0].(string)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		var arg2 uint32
+		if args[2] != nil {
+			arg2 = args[2].(uint32)
+		}
+		var arg3 netlink.DevlinkPortFnSetAttrs
+		if args[3] != nil {
+			arg3 = args[3].(netlink.DevlinkPortFnSetAttrs)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+			arg3,
+		)
+	})
+	return _c
+}
+
+func (_c *MockNetlinkOps_DevLinkPortFnSet_Call) Return(err error) *MockNetlinkOps_DevLinkPortFnSet_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockNetlinkOps_DevLinkPortFnSet_Call) RunAndReturn(run func(busName string, deviceName string, portIndex uint32, fnAttrs netlink.DevlinkPortFnSetAttrs) error) *MockNetlinkOps_DevLinkPortFnSet_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // LinkByName provides a mock function for the type MockNetlinkOps
 func (_mock *MockNetlinkOps) LinkByName(name string) (netlink.Link, error) {
 	ret := _mock.Called(name)
