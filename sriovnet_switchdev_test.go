@@ -1021,6 +1021,110 @@ func TestGetPortIndexFromRepresentor(t *testing.T) {
 	}
 }
 
+func TestGetPortIndexFromRepresentorDevlink(t *testing.T) {
+	tcases := []struct {
+		name          string
+		netdev        string
+		reps          []*repContext
+		devlinkPort   *netlink.DevlinkPort
+		expectedID    int
+		shouldFail    bool
+		expectedError string
+	}{
+		{
+			name:   "VF rep index from devlink",
+			netdev: "eth5",
+			reps: []*repContext{
+				{Name: "eth5", PhysPortName: "pf0vf5", PhysSwitchID: "c2cfc60003a1420c"},
+			},
+			devlinkPort: &netlink.DevlinkPort{
+				NetdeviceName:    "eth5",
+				PortFlavour:      uint16(PORT_FLAVOUR_PCI_VF),
+				ControllerNumber: ptrTo(uint32(0)),
+				VfNumber:         ptrTo(uint16(5)),
+			},
+			expectedID: 5,
+		},
+		{
+			name:   "SF rep index from devlink",
+			netdev: "eth5",
+			reps: []*repContext{
+				{Name: "eth5", PhysPortName: "pf0sf5", PhysSwitchID: "c2cfc60003a1420c"},
+			},
+			devlinkPort: &netlink.DevlinkPort{
+				NetdeviceName:    "eth5",
+				PortFlavour:      uint16(PORT_FLAVOUR_PCI_SF),
+				ControllerNumber: ptrTo(uint32(0)),
+				SfNumber:         ptrTo(uint32(5)),
+			},
+			expectedID: 5,
+		},
+		{
+			name:   "devlink takes precedence over phys_port_name",
+			netdev: "eth5",
+			reps: []*repContext{
+				// phys_port_name says vf=99, devlink reports vf=5
+				{Name: "eth5", PhysPortName: "pf0vf99", PhysSwitchID: "c2cfc60003a1420c"},
+			},
+			devlinkPort: &netlink.DevlinkPort{
+				NetdeviceName: "eth5",
+				PortFlavour:   uint16(PORT_FLAVOUR_PCI_VF),
+				VfNumber:      ptrTo(uint16(5)),
+			},
+			expectedID: 5,
+		},
+		{
+			name:   "VF rep with nil VfNumber falls back to sysfs",
+			netdev: "eth5",
+			reps: []*repContext{
+				{Name: "eth5", PhysPortName: "pf0vf5", PhysSwitchID: "c2cfc60003a1420c"},
+			},
+			devlinkPort: &netlink.DevlinkPort{
+				NetdeviceName: "eth5",
+				PortFlavour:   uint16(PORT_FLAVOUR_PCI_VF),
+				VfNumber:      nil,
+			},
+			expectedID: 5,
+		},
+		{
+			name:   "SF rep with nil SfNumber falls back to sysfs",
+			netdev: "eth5",
+			reps: []*repContext{
+				{Name: "eth5", PhysPortName: "pf0sf5", PhysSwitchID: "c2cfc60003a1420c"},
+			},
+			devlinkPort: &netlink.DevlinkPort{
+				NetdeviceName: "eth5",
+				PortFlavour:   uint16(PORT_FLAVOUR_PCI_SF),
+				SfNumber:      nil,
+			},
+			expectedID: 5,
+		},
+	}
+
+	for _, tcase := range tcases {
+		t.Run(tcase.name, func(t *testing.T) {
+			teardown := setupRepresentorEnv(t, "", tcase.reps)
+			defer teardown()
+
+			nlOpsMock := netlinkopsMocks.NewMockNetlinkOps(t)
+			netlinkops.SetNetlinkOps(nlOpsMock)
+			defer netlinkops.ResetNetlinkOps()
+
+			nlOpsMock.On("DevLinkGetPortByNetdevName", mock.AnythingOfType("string")).Return(
+				tcase.devlinkPort, nil)
+
+			portID, err := GetPortIndexFromRepresentor(tcase.netdev)
+			if tcase.shouldFail {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tcase.expectedError)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tcase.expectedID, portID)
+			}
+		})
+	}
+}
+
 func TestGetSfRepresentorDPU(t *testing.T) {
 	tcases := []struct {
 		name          string
