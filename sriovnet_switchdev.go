@@ -313,6 +313,30 @@ func findNetdevWithPortNameCriteria(criteria func(string) bool) (string, error) 
 	return "", fmt.Errorf("no representor matched criteria")
 }
 
+// getPortIndexDevlink returns the port index of a representor from its devlink port.
+// It supports VF and SF representor port flavors.
+func getPortIndexDevlink(repNetDev string) (int, error) {
+	port, err := netlinkops.GetNetlinkOps().DevLinkGetPortByNetdevName(repNetDev)
+	if err != nil {
+		return 0, err
+	}
+
+	switch port.PortFlavour {
+	case PORT_FLAVOUR_PCI_VF:
+		if port.VfNumber == nil {
+			return 0, fmt.Errorf("unexpected result from netlink. devlink port of type vf has no vf number")
+		}
+		return int(*port.VfNumber), nil
+	case PORT_FLAVOUR_PCI_SF:
+		if port.SfNumber == nil {
+			return 0, fmt.Errorf("unexpected result from netlink. devlink port of type sf has no sf number")
+		}
+		return int(*port.SfNumber), nil
+	default:
+		return 0, fmt.Errorf("unsupported port flavour %d for netdev %s", port.PortFlavour, repNetDev)
+	}
+}
+
 // GetPortIndexFromRepresentor finds the index of a representor from its network device name.
 // Supports VF and SF. For multiple port flavors, the same ID could be returned, i.e.
 //
@@ -329,6 +353,12 @@ func GetPortIndexFromRepresentor(repNetDev string) (int, error) {
 		return 0, fmt.Errorf("unsupported port flavor for netdev %s", repNetDev)
 	}
 
+	// try to get port index from devlink
+	if portIndex, err := getPortIndexDevlink(repNetDev); err == nil {
+		return portIndex, nil
+	}
+
+	// fallback to sysfs
 	physPortName, err := getNetDevPhysPortName(repNetDev)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get device %s physical port name: %v", repNetDev, err)
