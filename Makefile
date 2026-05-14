@@ -12,7 +12,9 @@ MOCKERY := $(BIN_DIR)/mockery
 # golangci-lint version should be updated periodically
 # we keep it fixed to avoid it from unexpectedly failing on the project
 # in case of a version bump
-GOLANGCI_LINT_VER := v2.3.0
+GOLANGCI_LINT_VER := v2.11.4
+GCOV2LCOV_VER := v1.1.1
+MOCKERY_VER := v3.7.0
 
 Q = $(if $(filter 1,$V),,@)
 
@@ -53,10 +55,10 @@ $(GOLANGCI_LINT): | $(BIN_DIR) ; $(info  building golangci-lint...)
 	$Q GOBIN=$(BIN_DIR) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VER)
 
 $(GCOV2LCOV):  | $(BIN_DIR) ; $(info  building gocov2lcov...)
-	$Q GOBIN=$(BIN_DIR) go install github.com/jandelgado/gcov2lcov@v1.0.5
+	$Q GOBIN=$(BIN_DIR) go install github.com/jandelgado/gcov2lcov@$(GCOV2LCOV_VER)
 
 $(MOCKERY): | $(BIN_DIR) ; $(info  building mockery...)
-	$Q GOBIN=$(BIN_DIR) go install github.com/vektra/mockery/v3@v3.5.3
+	$Q GOBIN=$(BIN_DIR) go install github.com/vektra/mockery/v3@$(MOCKERY_VER)
 
 # Misc
 .PHONY: clean
