@@ -17,10 +17,8 @@ limitations under the License.
 package sriovnet
 
 import (
-	"errors"
 	"fmt"
 	"net"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -105,19 +103,67 @@ func isSwitchdev(netdevice string) bool {
 	return false
 }
 
+// getUplinkRepresentorDevlink returns the uplink representor netdev name for a given PCI address
+func getUplinkRepresentorDevlink(pciAddress string) (string, error) {
+	// Note(adrianc): we do not check that the devlink device eswitch mode is in switchdev mode,
+	// the implementation should work for both switchdev and legacy modes.
+
+	// list all ports. physical ports are not registered under the devlink device with the given PCI address.
+	// e.g:
+	//	auxiliary/mlx5_core.eth.5/262143: type eth netdev p1 flavour physical port 1 splittable false
+	ports, err := netlinkops.GetNetlinkOps().DevLinkGetAllPortList()
+	if err != nil {
+		return "", fmt.Errorf("failed to list devlink ports: %w", err)
+	}
+
+	// filter ports with flavor physical with non empty netdevice name
+	// Note(adrianc): a devlink port may not have a netdevice if the device is in a different namespace
+	// or if the port does not have a netdevice yet.
+	var candidateNetdevs []string
+	for _, port := range ports {
+		if port.PortFlavour == uint16(PORT_FLAVOUR_PHYSICAL) && port.NetdeviceName != "" {
+			candidateNetdevs = append(candidateNetdevs, port.NetdeviceName)
+		}
+	}
+
+	// assuming at most only one devlink port of type physical exists for a given PCI address
+	// find the netdev that is registered under the given PCI address
+	for _, netdev := range candidateNetdevs {
+		expectedNetdevPath := filepath.Join(PciSysDir, pciAddress, "net", netdev)
+		if _, err := utilfs.Fs.Stat(expectedNetdevPath); err == nil {
+			return netdev, nil
+		}
+	}
+
+	return "", fmt.Errorf("failed to find uplink representor for %s", pciAddress)
+}
+
 // GetUplinkRepresentor gets a VF or PF PCI address (e.g '0000:03:00.4') and
 // returns the uplink represntor netdev name for that VF or PF.
 func GetUplinkRepresentor(pciAddress string) (string, error) {
-	devicePath := filepath.Join(PciSysDir, pciAddress, "physfn", "net")
-	if _, err := utilfs.Fs.Stat(devicePath); errors.Is(err, os.ErrNotExist) {
-		// If physfn symlink to the parent PF doesn't exist, use the current device's dir
-		devicePath = filepath.Join(PciSysDir, pciAddress, "net")
+	// get the PF PCI address, it may be the provided pciAddress or its parent pointed by physfn in case of VF.
+	pfPCIAddress := pciAddress
+	physfnPath := filepath.Join(PciSysDir, pciAddress, "physfn")
+	if _, err := utilfs.Fs.Stat(physfnPath); err == nil {
+		// physfn exists → device is a VF; read the symlink to get the PF PCI address
+		lnk, err := utilfs.Fs.Readlink(physfnPath)
+		if err != nil {
+			return "", fmt.Errorf("failed to read link %s for %s: %w", physfnPath, pciAddress, err)
+		}
+		pfPCIAddress = filepath.Base(lnk)
 	}
 
-	devices, err := utilfs.Fs.ReadDir(devicePath)
-	if err != nil {
-		return "", fmt.Errorf("failed to lookup %s: %v", pciAddress, err)
+	// try to get uplink representor from devlink
+	if uplink, err := getUplinkRepresentorDevlink(pfPCIAddress); err == nil {
+		return uplink, nil
 	}
+
+	// fallback to sysfs
+	devices, err := utilfs.Fs.ReadDir(filepath.Join(PciSysDir, pfPCIAddress, "net"))
+	if err != nil {
+		return "", fmt.Errorf("failed to read net dir for pf device %s: %w", pfPCIAddress, err)
+	}
+
 	for _, device := range devices {
 		if isSwitchdev(device.Name()) {
 			devicePhysPortName, err := getNetDevPhysPortName(device.Name())
