@@ -24,6 +24,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/vishvananda/netlink"
+
 	utilfs "github.com/k8snetworkplumbingwg/sriovnet/pkg/utils/filesystem"
 	"github.com/k8snetworkplumbingwg/sriovnet/pkg/utils/netlinkops"
 )
@@ -332,8 +334,8 @@ func getNetDevPhysPortName(netDev string) (string, error) {
 
 // findNetdevWithPortNameCriteria returns representor netdev that matches a criteria function on the
 // physical port name
-func findNetdevWithPortNameCriteria(criteria func(string) bool) (string, error) {
-	netdevs, err := utilfs.Fs.ReadDir(NetSysDir)
+func findNetdevWithPortNameCriteria(netdir string, criteria func(string) bool) (string, error) {
+	netdevs, err := utilfs.Fs.ReadDir(netdir)
 	if err != nil {
 		return "", err
 	}
@@ -448,7 +450,7 @@ func GetVfRepresentorDPU(pfID, vfIndex string) (string, error) {
 	// match port name with external controller index
 	// NOTE: no support for Multi-Chassis DPUs
 	expectedPhysPortName := fmt.Sprintf("c1pf%svf%s", pfID, vfIndex)
-	netdev, err := findNetdevWithPortNameCriteria(func(portName string) bool {
+	netdev, err := findNetdevWithPortNameCriteria(NetSysDir, func(portName string) bool {
 		return portName == expectedPhysPortName
 	})
 
@@ -459,7 +461,7 @@ func GetVfRepresentorDPU(pfID, vfIndex string) (string, error) {
 	// match port name without controller index (legacy)
 	// NOTE: here we assume the only VF representors on the DPU are for host VFs (and not for local VFs).
 	expectedPhysPortName = fmt.Sprintf("pf%svf%s", pfID, vfIndex)
-	netdev, err = findNetdevWithPortNameCriteria(func(portName string) bool {
+	netdev, err = findNetdevWithPortNameCriteria(NetSysDir, func(portName string) bool {
 		return portName == expectedPhysPortName
 	})
 
@@ -485,7 +487,7 @@ func GetSfRepresentorDPU(pfID, sfIndex string) (string, error) {
 	// match port name with external controller index
 	// NOTE: no support for Multi-Chassis DPUs
 	expectedPhysPortName := fmt.Sprintf("c1pf%ssf%s", pfID, sfIndex)
-	netdev, err := findNetdevWithPortNameCriteria(func(portName string) bool {
+	netdev, err := findNetdevWithPortNameCriteria(NetSysDir, func(portName string) bool {
 		return portName == expectedPhysPortName
 	})
 
@@ -506,7 +508,7 @@ func GetPfRepresentorDPU(pfID string) (string, error) {
 	// match port name with external controller index
 	// NOTE: no support for Multi-Chassis DPUs
 	expectedPhysPortName := fmt.Sprintf("c1pf%s", pfID)
-	netdev, err := findNetdevWithPortNameCriteria(func(portName string) bool {
+	netdev, err := findNetdevWithPortNameCriteria(NetSysDir, func(portName string) bool {
 		return portName == expectedPhysPortName
 	})
 
@@ -516,7 +518,7 @@ func GetPfRepresentorDPU(pfID string) (string, error) {
 
 	// match port name without controller index (legacy)
 	expectedPhysPortName = fmt.Sprintf("pf%s", pfID)
-	netdev, err = findNetdevWithPortNameCriteria(func(portName string) bool {
+	netdev, err = findNetdevWithPortNameCriteria(NetSysDir, func(portName string) bool {
 		return portName == expectedPhysPortName
 	})
 
@@ -626,10 +628,9 @@ func GetRepresentorPeerMacAddress(netdev string) (net.HardwareAddr, error) {
 			portName, netdev)
 	}
 	uplinkPhysPortName := "p" + portNum[1]
-	// Find uplink netdev for that port
-	// Note(adrianc): As we support only DPUs ATM we do not need to deal with netdevs from different
-	// eswitch (i.e different switch IDs).
-	uplinkNetdev, err := findNetdevWithPortNameCriteria(func(pname string) bool { return pname == uplinkPhysPortName })
+	// Find uplink netdev for that port, using the parent device net dir
+	netdir := filepath.Join(NetSysDir, netdev, "device", "net")
+	uplinkNetdev, err := findNetdevWithPortNameCriteria(netdir, func(pname string) bool { return pname == uplinkPhysPortName })
 	if err != nil {
 		return nil, fmt.Errorf("failed to find uplink port for netdev %s. %v", netdev, err)
 	}
@@ -668,6 +669,22 @@ func SetRepresentorPeerMacAddress(netdev string, mac net.HardwareAddr) error {
 		return fmt.Errorf("unsupported port flavour for netdev %s", netdev)
 	}
 
+	// attempt to set MAC address via devlink
+	port, err := netlinkops.GetNetlinkOps().DevLinkGetPortByNetdevName(netdev)
+	if err == nil {
+		// devlink port found, attempt to set MAC address via devlink
+		fnAttrs := netlink.DevlinkPortFnSetAttrs{
+			FnAttrs: netlink.DevlinkPortFn{
+				HwAddr: mac,
+			},
+			HwAddrValid: true,
+		}
+		if err := netlinkops.GetNetlinkOps().DevLinkPortFnSet(port.BusName, port.DeviceName, port.PortIndex, fnAttrs); err == nil {
+			return nil
+		}
+	}
+
+	// fallback to set MAC address via sysfs
 	physPortNameStr, err := getNetDevPhysPortName(netdev)
 	if err != nil {
 		return fmt.Errorf("failed to get phys_port_name for netdev %s: %v", netdev, err)
@@ -679,7 +696,9 @@ func SetRepresentorPeerMacAddress(netdev string, mac net.HardwareAddr) error {
 	}
 
 	uplinkPhysPortName := fmt.Sprintf("p%d", pfID)
-	uplinkNetdev, err := findNetdevWithPortNameCriteria(func(pname string) bool { return pname == uplinkPhysPortName })
+	// Find uplink netdev for that port, using the parent device net dir
+	netdir := filepath.Join(NetSysDir, netdev, "device", "net")
+	uplinkNetdev, err := findNetdevWithPortNameCriteria(netdir, func(pname string) bool { return pname == uplinkPhysPortName })
 	if err != nil {
 		return fmt.Errorf("failed to find netdev for physical port name %s. %v", uplinkPhysPortName, err)
 	}
