@@ -1264,7 +1264,7 @@ func TestGetPortIndexFromRepresentorDevlink(t *testing.T) {
 
 	for _, tcase := range tcases {
 		t.Run(tcase.name, func(t *testing.T) {
-			teardown := setupRepresentorEnv(t, "", tcase.reps)
+			teardown := setupRepresentorEnv(t, tcase.reps)
 			defer teardown()
 
 			nlOpsMock := netlinkopsMocks.NewMockNetlinkOps(t)
@@ -1751,7 +1751,7 @@ func TestSetRepresentorPeerMacAddressDevlink(t *testing.T) {
 
 	for _, tcase := range tcases {
 		t.Run(tcase.name, func(t *testing.T) {
-			teardown := setupRepresentorEnv(t, "", tcase.reps)
+			teardown := setupRepresentorEnv(t, tcase.reps)
 			defer teardown()
 
 			nlOpsMock := netlinkopsMocks.NewMockNetlinkOps(t)
