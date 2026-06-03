@@ -184,10 +184,10 @@ func GetUplinkRepresentor(pciAddress string) (string, error) {
 	return "", fmt.Errorf("uplink for %s not found", pciAddress)
 }
 
-// getRepresentorDevlink returns the representor netdev name for a given device, portflavor, controller number and index.
-func getRepresentorDevlink(deviceName string, flavor PortFlavour, controllerNumber uint32, index uint32) (string, error) {
+// getRepresentorDevlink returns the representor netdev name for a given device, portflavor, controller number, index and  pf number(optional).
+func getRepresentorDevlink(deviceName string, flavor PortFlavour, controllerNumber uint32, index uint32, pfNum *uint16) (string, error) {
 	// check for supported flavor
-	if flavor != PORT_FLAVOUR_PCI_VF && flavor != PORT_FLAVOUR_PCI_SF {
+	if flavor != PORT_FLAVOUR_PCI_VF && flavor != PORT_FLAVOUR_PCI_SF && flavor != PORT_FLAVOUR_PCI_PF {
 		return "", fmt.Errorf("unsupported flavor %d", flavor)
 	}
 
@@ -206,23 +206,38 @@ func getRepresentorDevlink(deviceName string, flavor PortFlavour, controllerNumb
 			continue
 		}
 
-		// get devlink port sf/vf number
+		// if pfNum is specified, check that the port pf number matches.
+		if pfNum != nil && (port.PfNumber == nil || *port.PfNumber != *pfNum) {
+			continue
+		}
+
+		// get devlink port pf/sf/vf number
 		var dpIndex uint32
 		switch flavor {
+		case PORT_FLAVOUR_PCI_PF:
+			if port.PfNumber == nil {
+				return "", fmt.Errorf("unexpected result from netlink. devlink port of type pf has no pf number. pci/%s/%d", deviceName, port.PortIndex)
+			}
+			dpIndex = uint32(*port.PfNumber)
 		case PORT_FLAVOUR_PCI_VF:
 			if port.VfNumber == nil {
-				return "", fmt.Errorf("unexpected result from netlink. devlink port of type vf has not vf number. pci/%s/%d", deviceName, port.PortIndex)
+				return "", fmt.Errorf("unexpected result from netlink. devlink port of type vf has no vf number. pci/%s/%d", deviceName, port.PortIndex)
 			}
 			dpIndex = uint32(*port.VfNumber)
 		case PORT_FLAVOUR_PCI_SF:
 			if port.SfNumber == nil {
-				return "", fmt.Errorf("unexpected result from netlink. devlink port of type sf has not sf number. pci/%s/%d", deviceName, port.PortIndex)
+				return "", fmt.Errorf("unexpected result from netlink. devlink port of type sf has no sf number. pci/%s/%d", deviceName, port.PortIndex)
 			}
 			dpIndex = *port.SfNumber
 		}
 
 		if dpIndex != index {
 			continue
+		}
+
+		// we found the matching devlink port, the netdevice attribute is the representor netdev name
+		if port.NetdeviceName == "" {
+			return "", fmt.Errorf("unexpected result from netlink. devlink port of type %d has no netdevice name. pci/%s/%d", flavor, deviceName, port.PortIndex)
 		}
 
 		return port.NetdeviceName, nil
@@ -249,7 +264,7 @@ func GetVfRepresentor(uplink string, vfIndex int) (string, error) {
 	}
 
 	// try to get representor from devlink
-	representor, err := getRepresentorDevlink(uplinkPCI, PORT_FLAVOUR_PCI_VF, 0, uint32(vfIndex))
+	representor, err := getRepresentorDevlink(uplinkPCI, PORT_FLAVOUR_PCI_VF, 0, uint32(vfIndex), nil)
 	if err == nil {
 		return representor, nil
 	}
@@ -295,7 +310,7 @@ func GetSfRepresentor(uplink string, sfNum int) (string, error) {
 	}
 
 	// try to get representor from devlink
-	representor, err := getRepresentorDevlink(uplinkPCI, PORT_FLAVOUR_PCI_SF, 0, uint32(sfNum))
+	representor, err := getRepresentorDevlink(uplinkPCI, PORT_FLAVOUR_PCI_SF, 0, uint32(sfNum), nil)
 	if err == nil {
 		return representor, nil
 	}
@@ -433,6 +448,8 @@ func GetPortIndexFromRepresentor(repNetDev string) (int, error) {
 }
 
 // GetVfRepresentorDPU returns VF representor on DPU for a host VF identified by pfID and vfIndex
+//
+// Deprecated: use GetVfRepresentorFromPortParams instead.
 func GetVfRepresentorDPU(pfID, vfIndex string) (string, error) {
 	// TODO(Adrianc): This method should change to get switchID and vfIndex as input, then common logic can
 	// be shared with GetVfRepresentor, backward compatibility should be preserved when this happens.
@@ -473,6 +490,8 @@ func GetVfRepresentorDPU(pfID, vfIndex string) (string, error) {
 }
 
 // GetSfRepresentorDPU returns SF representor on DPU for a host SF identified by pfID and sfIndex
+//
+// Deprecated: use GetSfRepresentorFromPortParams instead.
 func GetSfRepresentorDPU(pfID, sfIndex string) (string, error) {
 	// pfID should be 0 or 1
 	if pfID != "0" && pfID != "1" {
@@ -499,6 +518,8 @@ func GetSfRepresentorDPU(pfID, sfIndex string) (string, error) {
 }
 
 // GetPfRepresentorDPU returns PF representor on DPU for a host PF identified by its ID.
+//
+// Deprecated: use GetPfRepresentorFromPortParams instead.
 func GetPfRepresentorDPU(pfID string) (string, error) {
 	// pfID should be 0 or 1
 	if pfID != "0" && pfID != "1" {
