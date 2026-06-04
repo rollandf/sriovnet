@@ -17,6 +17,7 @@ limitations under the License.
 package sriovnet
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -51,23 +52,25 @@ const (
 	PORT_FLAVOUR_UNKNOWN = 0xffff
 )
 
-// Regex that matches on the physical/upling port name
-var physPortRepRegex = regexp.MustCompile(`^p(\d+)$`)
+var (
+	// ErrRepresentorNotFound is returned when a representor is not found.
+	ErrRepresentorNotFound = errors.New("representor not found")
+)
 
-// Regex that matches on PF representor port name. These ports exists on DPUs and represents ports on Host.
-var pfPortRepRegex = regexp.MustCompile(`^(?:c\d+)?pf(\d+)$`)
-
-// Regex that matches on VF representor port name for a local VF.
-var vfPortRepRegex = regexp.MustCompile(`^pf(\d+)vf(\d+)$`)
-
-// Regex that matches on VF representor port name with controller index. These ports exists on DPUs. and represent VFs on Host.
-var vfPortRepRegexWithControllerIndex = regexp.MustCompile(`^c\d+pf(\d+)vf(\d+)$`)
-
-// Regex that matches on SF representor port name
-var sfPortRepRegex = regexp.MustCompile(`^pf(\d+)sf(\d+)$`)
-
-// Regex that matches on SF representor port name with controller index. These ports exists on DPUs. and represent SFs on Host.
-var sfPortRepRegexWithControllerIndex = regexp.MustCompile(`^c\d+pf(\d+)sf(\d+)$`)
+var (
+	// Regex that matches on the physical/uplink port name
+	physPortRepRegex = regexp.MustCompile(`^p(\d+)$`)
+	// Regex that matches on PF representor port name. These ports exists on DPUs and represents ports on Host.
+	pfPortRepRegex = regexp.MustCompile(`^(?:c\d+)?pf(\d+)$`)
+	// Regex that matches on VF representor port name for a local VF.
+	vfPortRepRegex = regexp.MustCompile(`^pf(\d+)vf(\d+)$`)
+	// Regex that matches on VF representor port name with controller index. These ports exists on DPUs. and represent VFs on Host.
+	vfPortRepRegexWithControllerIndex = regexp.MustCompile(`^c\d+pf(\d+)vf(\d+)$`)
+	// Regex that matches on SF representor port name
+	sfPortRepRegex = regexp.MustCompile(`^pf(\d+)sf(\d+)$`)
+	// Regex that matches on SF representor port name with controller index. These ports exists on DPUs. and represent SFs on Host.
+	sfPortRepRegexWithControllerIndex = regexp.MustCompile(`^c\d+pf(\d+)sf(\d+)$`)
+)
 
 func parseIndexFromPhysPortName(portName string, regex *regexp.Regexp) (pfRepIndex, vfRepIndex int, err error) {
 	matches := regex.FindStringSubmatch(portName)
@@ -137,7 +140,7 @@ func getUplinkRepresentorDevlink(pciAddress string) (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("failed to find uplink representor for %s", pciAddress)
+	return "", fmt.Errorf("failed to get uplink representor for %s: %w", pciAddress, ErrRepresentorNotFound)
 }
 
 // GetUplinkRepresentor gets a VF or PF PCI address (e.g '0000:03:00.4') and
@@ -181,7 +184,7 @@ func GetUplinkRepresentor(pciAddress string) (string, error) {
 			return device.Name(), nil
 		}
 	}
-	return "", fmt.Errorf("uplink for %s not found", pciAddress)
+	return "", fmt.Errorf("failed to get uplink representor for %s: %w", pciAddress, ErrRepresentorNotFound)
 }
 
 // getRepresentorDevlink returns the representor netdev name for a given device, portflavor, controller number, index and  pf number(optional).
@@ -243,7 +246,8 @@ func getRepresentorDevlink(deviceName string, flavor PortFlavour, controllerNumb
 		return port.NetdeviceName, nil
 	}
 
-	return "", fmt.Errorf("failed to find representor for: device %s, flavor %d, controller %d, index %d", deviceName, flavor, controllerNumber, index)
+	return "", fmt.Errorf("failed to get representor via devlink: device %s, flavor %d, controller %d, index %d: %w",
+		deviceName, flavor, controllerNumber, index, ErrRepresentorNotFound)
 }
 
 // GetVfRepresentor returns the VF representor netdev name for a given uplink netdev and vfIndex.
@@ -293,7 +297,7 @@ func GetVfRepresentor(uplink string, vfIndex int) (string, error) {
 			return device.Name(), nil
 		}
 	}
-	return "", fmt.Errorf("failed to find VF representor for uplink %s, vfIndex %d", uplink, vfIndex)
+	return "", fmt.Errorf("failed to get VF representor for uplink %s, vfIndex %d: %w", uplink, vfIndex, ErrRepresentorNotFound)
 }
 
 // GetSfRepresentor returns the SF representor netdev name for a given uplink netdev and sfIndex.
@@ -335,7 +339,7 @@ func GetSfRepresentor(uplink string, sfNum int) (string, error) {
 			return device.Name(), nil
 		}
 	}
-	return "", fmt.Errorf("failed to find SF representor for uplink %s, sfNum %d", uplink, sfNum)
+	return "", fmt.Errorf("failed to get SF representor for uplink %s, sfNum %d: %w", uplink, sfNum, ErrRepresentorNotFound)
 }
 
 func getNetDevPhysPortName(netDev string) (string, error) {
@@ -486,7 +490,7 @@ func GetVfRepresentorDPU(pfID, vfIndex string) (string, error) {
 		return netdev, nil
 	}
 
-	return "", fmt.Errorf("vf representor for pfID: %s, vfIndex: %s not found", pfID, vfIndex)
+	return "", fmt.Errorf("failed to get VF representor for pfID: %s, vfIndex: %s: %w", pfID, vfIndex, ErrRepresentorNotFound)
 }
 
 // GetSfRepresentorDPU returns SF representor on DPU for a host SF identified by pfID and sfIndex
@@ -514,7 +518,7 @@ func GetSfRepresentorDPU(pfID, sfIndex string) (string, error) {
 		return netdev, nil
 	}
 
-	return "", fmt.Errorf("sf representor for pfID: %s, sfIndex: %s not found", pfID, sfIndex)
+	return "", fmt.Errorf("failed to get SF representor for pfID: %s, sfIndex: %s: %w", pfID, sfIndex, ErrRepresentorNotFound)
 }
 
 // GetPfRepresentorDPU returns PF representor on DPU for a host PF identified by its ID.
@@ -547,7 +551,7 @@ func GetPfRepresentorDPU(pfID string) (string, error) {
 		return netdev, nil
 	}
 
-	return "", fmt.Errorf("pf representor for pfID: %s not found", pfID)
+	return "", fmt.Errorf("failed to get PF representor for pfID: %s: %w", pfID, ErrRepresentorNotFound)
 }
 
 // GetRepresentorPortFlavour returns the representor port flavour

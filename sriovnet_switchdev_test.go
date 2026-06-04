@@ -268,6 +268,7 @@ func TestGetVfRepresentor(t *testing.T) {
 		vfIndex          int
 		expectedVFRep    string
 		shouldFail       bool
+		expectedErr      error
 	}{
 		{
 			name:             "VF representor found",
@@ -294,6 +295,7 @@ func TestGetVfRepresentor(t *testing.T) {
 			vfIndex:       5,
 			expectedVFRep: "",
 			shouldFail:    true,
+			expectedErr:   ErrRepresentorNotFound,
 		},
 		{
 			name:             "VF representor not found - no representors",
@@ -303,6 +305,7 @@ func TestGetVfRepresentor(t *testing.T) {
 			vfIndex:          0,
 			expectedVFRep:    "",
 			shouldFail:       true,
+			expectedErr:      ErrRepresentorNotFound,
 		},
 		{
 			name:             "VF representor not found - invalid phys_port_name",
@@ -315,6 +318,7 @@ func TestGetVfRepresentor(t *testing.T) {
 			vfIndex:       0,
 			expectedVFRep: "",
 			shouldFail:    true,
+			expectedErr:   ErrRepresentorNotFound,
 		},
 		{
 			name:             "VF representor not found - missing phys_port_name",
@@ -327,6 +331,7 @@ func TestGetVfRepresentor(t *testing.T) {
 			vfIndex:       0,
 			expectedVFRep: "",
 			shouldFail:    true,
+			expectedErr:   ErrRepresentorNotFound,
 		},
 		{
 			name:             "uplink is not switchdev",
@@ -376,6 +381,7 @@ func TestGetVfRepresentor(t *testing.T) {
 			vfIndex:       2,
 			expectedVFRep: "",
 			shouldFail:    true,
+			expectedErr:   ErrRepresentorNotFound,
 		},
 	}
 
@@ -393,6 +399,9 @@ func TestGetVfRepresentor(t *testing.T) {
 			vfRep, err := GetVfRepresentor(tcase.uplink.Name, tcase.vfIndex)
 			if tcase.shouldFail {
 				assert.Error(t, err)
+				if tcase.expectedErr != nil {
+					assert.ErrorIs(t, err, tcase.expectedErr)
+				}
 			} else {
 				assert.NoError(t, err)
 				assert.Equal(t, tcase.expectedVFRep, vfRep)
@@ -473,6 +482,7 @@ func TestGetUplinkRepresentorWithPhysPortName(t *testing.T) {
 		vfReps               []*repContext
 		expectedUplinkNetdev string
 		shouldFail           bool
+		expectedErr          error
 	}{
 		{
 			name:         "uplink representor exists",
@@ -506,6 +516,7 @@ func TestGetUplinkRepresentorWithPhysPortName(t *testing.T) {
 			},
 			expectedUplinkNetdev: "",
 			shouldFail:           true,
+			expectedErr:          ErrRepresentorNotFound,
 		},
 		{
 			name:         "uplink representor missing switch id",
@@ -518,6 +529,7 @@ func TestGetUplinkRepresentorWithPhysPortName(t *testing.T) {
 			},
 			expectedUplinkNetdev: "",
 			shouldFail:           true,
+			expectedErr:          ErrRepresentorNotFound,
 		},
 		{
 			name:                 "no representors",
@@ -527,6 +539,7 @@ func TestGetUplinkRepresentorWithPhysPortName(t *testing.T) {
 			vfReps:               []*repContext{},
 			expectedUplinkNetdev: "",
 			shouldFail:           true,
+			expectedErr:          ErrRepresentorNotFound,
 		},
 		{
 			name:                 "missing uplink",
@@ -560,6 +573,9 @@ func TestGetUplinkRepresentorWithPhysPortName(t *testing.T) {
 			uplinkNetdev, err := GetUplinkRepresentor(queryAddr)
 			if tcase.shouldFail {
 				assert.Error(t, err)
+				if tcase.expectedErr != nil {
+					assert.ErrorIs(t, err, tcase.expectedErr)
+				}
 			} else {
 				assert.NoError(t, err)
 				assert.Equal(t, tcase.expectedUplinkNetdev, uplinkNetdev)
@@ -592,7 +608,6 @@ func TestGetUplinkRepresentorErrorEmptySwID(t *testing.T) {
 	pfPciAddress := "0000:03:00.0"
 	vfPciAddress := "0000:03:00.4"
 	uplinkRep := &repContext{Name: "eth0", PhysPortName: "", PhysSwitchID: ""}
-	expectedError := fmt.Sprintf("uplink for %s not found", vfPciAddress)
 
 	// mock netlink calls, trigger failure to fallback to sysfs
 	nlOpsMock := netlinkopsMocks.NewMockNetlinkOps(t)
@@ -615,7 +630,7 @@ func TestGetUplinkRepresentorErrorEmptySwID(t *testing.T) {
 	uplinkNetdev, err := GetUplinkRepresentor(vfPciAddress)
 	assert.Error(t, err)
 	assert.Equal(t, "", uplinkNetdev)
-	assert.Equal(t, expectedError, err.Error())
+	assert.ErrorIs(t, err, ErrRepresentorNotFound)
 }
 
 func TestGetUplinkRepresentorDevlink(t *testing.T) {
@@ -722,6 +737,7 @@ func TestGetVfRepresentorDPU(t *testing.T) {
 		vfID          string
 		expectedVFRep string
 		shouldFail    bool
+		expectedErr   error
 	}{
 		{
 			name: "Host VFs only",
@@ -771,6 +787,7 @@ func TestGetVfRepresentorDPU(t *testing.T) {
 			vfID:          "5",
 			expectedVFRep: "",
 			shouldFail:    true,
+			expectedErr:   ErrRepresentorNotFound,
 		},
 		{
 			name:          "invalid pfID",
@@ -805,6 +822,9 @@ func TestGetVfRepresentorDPU(t *testing.T) {
 			vfRep, err := GetVfRepresentorDPU(tcase.pfID, tcase.vfID)
 			if tcase.shouldFail {
 				assert.Error(t, err)
+				if tcase.expectedErr != nil {
+					assert.ErrorIs(t, err, tcase.expectedErr)
+				}
 			} else {
 				assert.NoError(t, err)
 				assert.Equal(t, tcase.expectedVFRep, vfRep)
@@ -820,6 +840,7 @@ func TestGetPfRepresentorDPU(t *testing.T) {
 		pfID          string
 		expectedPfRep string
 		shouldFail    bool
+		expectedErr   error
 	}{
 		{
 			name: "PF representor with controller index",
@@ -861,6 +882,7 @@ func TestGetPfRepresentorDPU(t *testing.T) {
 			pfID:          "1",
 			expectedPfRep: "",
 			shouldFail:    true,
+			expectedErr:   ErrRepresentorNotFound,
 		},
 		{
 			name:          "invalid pfID",
@@ -885,6 +907,9 @@ func TestGetPfRepresentorDPU(t *testing.T) {
 			pfRep, err := GetPfRepresentorDPU(tcase.pfID)
 			if tcase.shouldFail {
 				assert.Error(t, err)
+				if tcase.expectedErr != nil {
+					assert.ErrorIs(t, err, tcase.expectedErr)
+				}
 			} else {
 				assert.NoError(t, err)
 				assert.Equal(t, tcase.expectedPfRep, pfRep)
@@ -905,6 +930,7 @@ func TestGetSfRepresentor(t *testing.T) {
 		sfIndex          int
 		expectedSFRep    string
 		shouldFail       bool
+		expectedErr      error
 	}{
 		{
 			name:             "Local SFs only",
@@ -948,6 +974,7 @@ func TestGetSfRepresentor(t *testing.T) {
 			sfIndex:       2,
 			expectedSFRep: "",
 			shouldFail:    true,
+			expectedErr:   ErrRepresentorNotFound,
 		},
 		{
 			name:             "SF rep no found no reps",
@@ -958,6 +985,7 @@ func TestGetSfRepresentor(t *testing.T) {
 			sfIndex:          2,
 			expectedSFRep:    "",
 			shouldFail:       true,
+			expectedErr:      ErrRepresentorNotFound,
 		},
 		{
 			name:             "SF rep no found only external reps",
@@ -972,6 +1000,7 @@ func TestGetSfRepresentor(t *testing.T) {
 			sfIndex:       2,
 			expectedSFRep: "",
 			shouldFail:    true,
+			expectedErr:   ErrRepresentorNotFound,
 		},
 		{
 			name:             "SF rep no found sf index not found",
@@ -985,6 +1014,7 @@ func TestGetSfRepresentor(t *testing.T) {
 			sfIndex:       3,
 			expectedSFRep: "",
 			shouldFail:    true,
+			expectedErr:   ErrRepresentorNotFound,
 		},
 		{
 			name:             "SF rep not found - no uplink",
@@ -1012,6 +1042,9 @@ func TestGetSfRepresentor(t *testing.T) {
 			sfRep, err := GetSfRepresentor(tcase.uplinkToCall, tcase.sfIndex)
 			if tcase.shouldFail {
 				assert.Error(t, err)
+				if tcase.expectedErr != nil {
+					assert.ErrorIs(t, err, tcase.expectedErr)
+				}
 			} else {
 				assert.NoError(t, err)
 				assert.Equal(t, tcase.expectedSFRep, sfRep)
@@ -1294,6 +1327,7 @@ func TestGetSfRepresentorDPU(t *testing.T) {
 		sfID          string
 		expectedSFRep string
 		shouldFail    bool
+		expectedErr   error
 	}{
 		{
 			name: "Host SFs only",
@@ -1331,6 +1365,7 @@ func TestGetSfRepresentorDPU(t *testing.T) {
 			sfID:          "2",
 			expectedSFRep: "",
 			shouldFail:    true,
+			expectedErr:   ErrRepresentorNotFound,
 		},
 		{
 			name: "SF representor not found",
@@ -1341,6 +1376,7 @@ func TestGetSfRepresentorDPU(t *testing.T) {
 			sfID:          "5",
 			expectedSFRep: "",
 			shouldFail:    true,
+			expectedErr:   ErrRepresentorNotFound,
 		},
 		{
 			name:          "invalid pfID",
@@ -1375,6 +1411,9 @@ func TestGetSfRepresentorDPU(t *testing.T) {
 			vfRep, err := GetSfRepresentorDPU(tcase.pfID, tcase.sfID)
 			if tcase.shouldFail {
 				assert.Error(t, err)
+				if tcase.expectedErr != nil {
+					assert.ErrorIs(t, err, tcase.expectedErr)
+				}
 			} else {
 				assert.NoError(t, err)
 				assert.Equal(t, tcase.expectedSFRep, vfRep)
