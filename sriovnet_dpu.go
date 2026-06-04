@@ -19,9 +19,11 @@ package sriovnet
 import (
 	"fmt"
 	"net"
+	"strconv"
 
 	"github.com/vishvananda/netlink"
 
+	"github.com/k8snetworkplumbingwg/sriovnet/pkg/utils/docacaps"
 	"github.com/k8snetworkplumbingwg/sriovnet/pkg/utils/netlinkops"
 )
 
@@ -124,5 +126,49 @@ func GetPFRepresentorPortParamsFromMAC(mac net.HardwareAddr) (*RepresentorPortPa
 		ECPF:             port.DeviceName,
 		ControllerNumber: *port.ControllerNumber,
 		PFNumber:         *port.PfNumber,
+	}, nil
+}
+
+// GetRepresentorPortParamsFromVUID returns the representor port parameters from the provided VUID.
+// a VUID is a unique identifier of a specific NIC function/vport
+// for a given PF, the vuid may be extracted from the device PCI VPD (VU keyword)
+// example: [VU] Vendor specific: e4092a71f9c1f0118000b45cb5355194MLNXS0D0F0
+//
+// Note: this function relies on the doca_caps CLI tool to be present in the system.
+// if the application is running in a container, the tool may be mounted from the host.
+// to override the default doca_caps path set the SRIOVNET_DOCA_CAPS_BIN environment variable to the desired path.
+func GetRepresentorPortParamsFromVUID(vuid string) (*RepresentorPortParams, error) {
+	dev, err := docacaps.NewDocaCaps().GetDocaCapRepDevByVUID(vuid)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get rep dev from doca_caps by VUID %q: %w", vuid, err)
+	}
+
+	ecpf := dev.ECPFPCIAddress
+	if ecpf == "" {
+		return nil, fmt.Errorf("unexpected result from doca_caps: rep dev with VUID %q has missing ecpf PCI address", vuid)
+	}
+
+	controllerNumberStr := dev.Attributes["host_index"]
+	if controllerNumberStr == "" {
+		return nil, fmt.Errorf("unexpected result from doca_caps: rep dev with VUID %q has missing host_index attribute", vuid)
+	}
+	controllerNumber, err := strconv.ParseUint(controllerNumberStr, 10, 32)
+	if err != nil {
+		return nil, fmt.Errorf("unexpected result from doca_caps: rep dev with VUID %q has invalid host_index attribute: %s: %w", vuid, controllerNumberStr, err)
+	}
+
+	pfNumStr := dev.Attributes["pf_index"]
+	if pfNumStr == "" {
+		return nil, fmt.Errorf("unexpected result from doca_caps: rep dev with VUID %q has missing pf_index attribute", vuid)
+	}
+	pfNum, err := strconv.ParseUint(pfNumStr, 10, 16)
+	if err != nil {
+		return nil, fmt.Errorf("unexpected result from doca_caps: rep dev with VUID %q has invalid pf_index attribute: %s: %w", vuid, pfNumStr, err)
+	}
+
+	return &RepresentorPortParams{
+		ECPF:             ecpf,
+		ControllerNumber: uint32(controllerNumber),
+		PFNumber:         uint16(pfNum),
 	}, nil
 }

@@ -24,6 +24,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/vishvananda/netlink"
 
+	"github.com/k8snetworkplumbingwg/sriovnet/pkg/utils/docacaps"
+	docacapsMocks "github.com/k8snetworkplumbingwg/sriovnet/pkg/utils/docacaps/mocks"
 	"github.com/k8snetworkplumbingwg/sriovnet/pkg/utils/netlinkops"
 	netlinkopsMocks "github.com/k8snetworkplumbingwg/sriovnet/pkg/utils/netlinkops/mocks"
 )
@@ -765,6 +767,146 @@ func TestGetPFRepresentorPortParamsFromMAC(t *testing.T) {
 			nlOpsMock.On("DevLinkGetAllPortList").Return(tcase.devlinkPorts, tcase.devlinkErr)
 
 			pp, err := GetPFRepresentorPortParamsFromMAC(tcase.mac)
+			if tcase.shouldFail {
+				assert.Error(t, err)
+				if tcase.expectedError != "" {
+					assert.Contains(t, err.Error(), tcase.expectedError)
+				}
+				assert.Nil(t, pp)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tcase.expectedPP, pp)
+			}
+		})
+	}
+}
+
+// setMockDocaCaps overrides docacaps.NewDocaCaps for the duration of the test so that
+// GetRepresentorPortParamsFromVUID uses the supplied mock instead of executing doca_caps.
+// The original NewDocaCaps is restored via t.Cleanup.
+func setMockDocaCaps(t *testing.T, mock *docacapsMocks.MockDOCACaps) {
+	t.Helper()
+	orig := docacaps.NewDocaCaps
+	docacaps.NewDocaCaps = func() docacaps.DOCACaps { return mock }
+	t.Cleanup(func() {
+		docacaps.NewDocaCaps = orig
+	})
+}
+
+func TestGetRepresentorPortParamsFromVUID(t *testing.T) {
+	const (
+		vuid = "e4092a71f9c1f0118000b45cb5355194MLNXS0D0F0"
+		ecpf = "0000:01:00.0"
+	)
+
+	tcases := []struct {
+		name          string
+		vuid          string
+		repDev        *docacaps.DocaCapRepDev
+		repDevErr     error
+		expectedPP    *RepresentorPortParams
+		shouldFail    bool
+		expectedError string
+	}{
+		{
+			name: "successful lookup",
+			vuid: vuid,
+			repDev: &docacaps.DocaCapRepDev{
+				ECPFPCIAddress:        ecpf,
+				RepresentorPCIAddress: "0000:9f:00.0",
+				Attributes: map[string]string{
+					"host_index": "1",
+					"pf_index":   "0",
+					"vuid":       vuid,
+				},
+			},
+			expectedPP: &RepresentorPortParams{
+				ECPF:             ecpf,
+				ControllerNumber: 1,
+				PFNumber:         0,
+			},
+		},
+		{
+			name:          "doca_caps lookup error",
+			vuid:          vuid,
+			repDevErr:     fmt.Errorf("doca_caps failed"),
+			shouldFail:    true,
+			expectedError: "failed to get rep dev from doca_caps by VUID",
+		},
+		{
+			name: "missing ECPF PCI address",
+			vuid: vuid,
+			repDev: &docacaps.DocaCapRepDev{
+				ECPFPCIAddress: "",
+				Attributes: map[string]string{
+					"host_index": "1",
+					"pf_index":   "0",
+				},
+			},
+			shouldFail:    true,
+			expectedError: "missing ecpf PCI address",
+		},
+		{
+			name: "missing host_index attribute",
+			vuid: vuid,
+			repDev: &docacaps.DocaCapRepDev{
+				ECPFPCIAddress: ecpf,
+				Attributes: map[string]string{
+					"pf_index": "0",
+				},
+			},
+			shouldFail:    true,
+			expectedError: "missing host_index attribute",
+		},
+		{
+			name: "invalid host_index - non numeric",
+			vuid: vuid,
+			repDev: &docacaps.DocaCapRepDev{
+				ECPFPCIAddress: ecpf,
+				Attributes: map[string]string{
+					"host_index": "notanumber",
+					"pf_index":   "0",
+				},
+			},
+			shouldFail:    true,
+			expectedError: "invalid host_index attribute",
+		},
+		{
+			name: "missing pf_index attribute",
+			vuid: vuid,
+			repDev: &docacaps.DocaCapRepDev{
+				ECPFPCIAddress: ecpf,
+				Attributes: map[string]string{
+					"host_index": "0",
+				},
+			},
+			shouldFail:    true,
+			expectedError: "missing pf_index attribute",
+		},
+		{
+			name: "invalid pf_index - non numeric",
+			vuid: vuid,
+			repDev: &docacaps.DocaCapRepDev{
+				ECPFPCIAddress: ecpf,
+				Attributes: map[string]string{
+					"host_index": "0",
+					"pf_index":   "notanumber",
+				},
+			},
+			shouldFail:    true,
+			expectedError: "invalid pf_index attribute",
+		},
+	}
+
+	for _, tcase := range tcases {
+		t.Run(tcase.name, func(t *testing.T) {
+			mockDC := docacapsMocks.NewMockDOCACaps(t)
+			setMockDocaCaps(t, mockDC)
+
+			mockDC.EXPECT().GetDocaCapRepDevByVUID(tcase.vuid).Return(tcase.repDev, tcase.repDevErr)
+
+			pp, err := GetRepresentorPortParamsFromVUID(tcase.vuid)
+
 			if tcase.shouldFail {
 				assert.Error(t, err)
 				if tcase.expectedError != "" {
