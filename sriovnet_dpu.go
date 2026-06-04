@@ -43,7 +43,7 @@ func GetVfRepresentorFromPortParams(pp *RepresentorPortParams, vfIndex uint32) (
 		return "", fmt.Errorf("port parameters are nil")
 	}
 
-	rep, err := getRepresentorDevlink(pp.ECPF, PORT_FLAVOUR_PCI_VF, pp.ControllerNumber, vfIndex, &pp.PFNumber)
+	rep, err := getRepresentorDevlink(pp.ECPF, PORT_FLAVOUR_PCI_VF, vfIndex, nil, &pp.ControllerNumber, &pp.PFNumber)
 	if err != nil {
 		return "", fmt.Errorf("failed to get representor netdev name for VF %d: %w", vfIndex, err)
 	}
@@ -56,7 +56,7 @@ func GetSfRepresentorFromPortParams(pp *RepresentorPortParams, sfIndex uint32) (
 		return "", fmt.Errorf("port parameters are nil")
 	}
 
-	rep, err := getRepresentorDevlink(pp.ECPF, PORT_FLAVOUR_PCI_SF, pp.ControllerNumber, sfIndex, &pp.PFNumber)
+	rep, err := getRepresentorDevlink(pp.ECPF, PORT_FLAVOUR_PCI_SF, sfIndex, nil, &pp.ControllerNumber, &pp.PFNumber)
 	if err != nil {
 		return "", fmt.Errorf("failed to get representor netdev name for SF %d: %w", sfIndex, err)
 	}
@@ -69,7 +69,7 @@ func GetPfRepresentorFromPortParams(pp *RepresentorPortParams) (string, error) {
 		return "", fmt.Errorf("port parameters are nil")
 	}
 
-	rep, err := getRepresentorDevlink(pp.ECPF, PORT_FLAVOUR_PCI_PF, pp.ControllerNumber, uint32(pp.PFNumber), &pp.PFNumber)
+	rep, err := getRepresentorDevlink(pp.ECPF, PORT_FLAVOUR_PCI_PF, uint32(pp.PFNumber), nil, &pp.ControllerNumber, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to get representor netdev name for PF %d: %w", pp.PFNumber, err)
 	}
