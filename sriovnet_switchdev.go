@@ -108,6 +108,10 @@ func isSwitchdev(netdevice string) bool {
 	return false
 }
 
+func isPCIAddress(address string) bool {
+	return pciAddressRe.MatchString(address)
+}
+
 // getUplinkRepresentorDevlink returns the uplink representor netdev name for a given PCI address
 func getUplinkRepresentorDevlink(pciAddress string) (string, error) {
 	// Note(adrianc): we do not check that the devlink device eswitch mode is in switchdev mode,
@@ -146,6 +150,10 @@ func getUplinkRepresentorDevlink(pciAddress string) (string, error) {
 // GetUplinkRepresentor gets a VF or PF PCI address (e.g '0000:03:00.4') and
 // returns the uplink represntor netdev name for that VF or PF.
 func GetUplinkRepresentor(pciAddress string) (string, error) {
+	if !isPCIAddress(pciAddress) {
+		return "", fmt.Errorf("invalid PCI address %s", pciAddress)
+	}
+
 	// get the PF PCI address, it may be the provided pciAddress or its parent pointed by physfn in case of VF.
 	pfPCIAddress := pciAddress
 	physfnPath := filepath.Join(PciSysDir, pciAddress, "physfn")
@@ -250,21 +258,16 @@ func getRepresentorDevlink(deviceName string, flavor PortFlavour, controllerNumb
 		deviceName, flavor, controllerNumber, index, ErrRepresentorNotFound)
 }
 
-// GetVfRepresentor returns the VF representor netdev name for a given uplink netdev and vfIndex.
+// GetVfRepresentor returns the VF representor netdev name for a given uplink and vfIndex.
+// uplink can be a PCI address or a netdev name.
 func GetVfRepresentor(uplink string, vfIndex int) (string, error) {
-	// if uplink is not switchdev, return error early
-	if !isSwitchdev(uplink) {
-		return "", fmt.Errorf("uplink %s is not a switchdev", uplink)
+	uplinkPCI, err := parseUplinkToPCIAddress(uplink)
+	if err != nil {
+		return "", err
 	}
 
 	if vfIndex < 0 {
 		return "", fmt.Errorf("vfIndex %d is negative", vfIndex)
-	}
-
-	// get uplink pci device
-	uplinkPCI, err := getPCIFromDeviceName(uplink)
-	if err != nil {
-		return "", fmt.Errorf("failed to get pci address for uplink %s: %v", uplink, err)
 	}
 
 	// try to get representor from devlink
@@ -276,7 +279,7 @@ func GetVfRepresentor(uplink string, vfIndex int) (string, error) {
 	// try to get representor from phys_port_name
 
 	// representors of a specific uplinkare expected to be linked with the same device as the uplink
-	pfLinkPath := filepath.Join(NetSysDir, uplink, "device", "net")
+	pfLinkPath := filepath.Join(PciSysDir, uplinkPCI, "net")
 	devices, err := utilfs.Fs.ReadDir(pfLinkPath)
 	if err != nil {
 		return "", err
@@ -300,17 +303,16 @@ func GetVfRepresentor(uplink string, vfIndex int) (string, error) {
 	return "", fmt.Errorf("failed to get VF representor for uplink %s, vfIndex %d: %w", uplink, vfIndex, ErrRepresentorNotFound)
 }
 
-// GetSfRepresentor returns the SF representor netdev name for a given uplink netdev and sfIndex.
+// GetSfRepresentor returns the SF representor netdev name for a given uplink and sfIndex.
+// uplink can be a PCI address or a netdev name.
 func GetSfRepresentor(uplink string, sfNum int) (string, error) {
-	// if uplink is not switchdev, return error early
-	if !isSwitchdev(uplink) {
-		return "", fmt.Errorf("uplink %s is not a switchdev", uplink)
+	uplinkPCI, err := parseUplinkToPCIAddress(uplink)
+	if err != nil {
+		return "", err
 	}
 
-	// get uplink pci device
-	uplinkPCI, err := getPCIFromDeviceName(uplink)
-	if err != nil {
-		return "", fmt.Errorf("failed to get pci address for uplink %s: %v", uplink, err)
+	if sfNum < 0 {
+		return "", fmt.Errorf("sfNum %d is negative", sfNum)
 	}
 
 	// try to get representor from devlink
@@ -320,7 +322,7 @@ func GetSfRepresentor(uplink string, sfNum int) (string, error) {
 	}
 
 	// try to get representor from phys_port_name
-	pfNetPath := filepath.Join(NetSysDir, uplink, "device", "net")
+	pfNetPath := filepath.Join(PciSysDir, uplinkPCI, "net")
 	devices, err := utilfs.Fs.ReadDir(pfNetPath)
 	if err != nil {
 		return "", err
@@ -340,6 +342,24 @@ func GetSfRepresentor(uplink string, sfNum int) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("failed to get SF representor for uplink %s, sfNum %d: %w", uplink, sfNum, ErrRepresentorNotFound)
+}
+
+func parseUplinkToPCIAddress(uplink string) (string, error) {
+	if isPCIAddress(uplink) {
+		return uplink, nil
+	}
+
+	// if not a PCI address, assume its a netdev
+	if !isSwitchdev(uplink) {
+		return "", fmt.Errorf("uplink %s is not a switchdev", uplink)
+	}
+
+	uplinkPCI, err := getPCIFromDeviceName(uplink)
+	if err != nil {
+		return "", fmt.Errorf("failed to get pci address for uplink %s: %v", uplink, err)
+	}
+
+	return uplinkPCI, nil
 }
 
 func getNetDevPhysPortName(netDev string) (string, error) {

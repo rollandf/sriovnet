@@ -189,7 +189,7 @@ func setupDPUConfigFileForPort(t *testing.T, uplink, portName, fileContent strin
 	assert.NoError(t, err)
 }
 
-func setupRepresentorEnvForGetVfRepresentor(t *testing.T, uplink repContext, uplinkPciAddress string, vfReps []repContext) func() {
+func setupRepresentorEnvForGetVfRepresentor(t *testing.T, uplinkPciAddress string, uplink *repContext, vfReps []repContext) func() {
 	var err error
 	teardown := setupFakeFs(t)
 
@@ -212,27 +212,36 @@ func setupRepresentorEnvForGetVfRepresentor(t *testing.T, uplink repContext, upl
 		return teardown
 	}
 
-	// create uplink device and its netdev
-	pfNetDevicePath := filepath.Join(PciSysDir, uplinkPciAddress, "net", uplink.Name)
+	// create net folder for uplink pci address
+	pfNetDevicePath := filepath.Join(PciSysDir, uplinkPciAddress, "net")
 	err = utilfs.Fs.MkdirAll(pfNetDevicePath, os.FileMode(0755))
 	if err != nil {
 		return teardown
 	}
 
-	// with a link in /sys/class/net
-	err = utilfs.Fs.Symlink(pfNetDevicePath, filepath.Join(NetSysDir, uplink.Name))
-	if err != nil {
-		return teardown
-	}
-	// and a symlink for the device under /sys/class/net
-	err = utilfs.Fs.Symlink(filepath.Join(PciSysDir, uplinkPciAddress), filepath.Join(pfNetDevicePath, "device"))
-	if err != nil {
-		return teardown
-	}
+	// create uplink device and its netdev (if provided)
+	if uplink != nil {
+		pfNetUplinkPath := filepath.Join(PciSysDir, uplinkPciAddress, "net", uplink.Name)
+		err = utilfs.Fs.MkdirAll(pfNetUplinkPath, os.FileMode(0755))
+		if err != nil {
+			return teardown
+		}
 
-	// create phys_port_name and phys_switch_id files for the uplink
-	if err = setUpRepPhysFiles(&uplink); err != nil {
-		return teardown
+		// with a link in /sys/class/net
+		err = utilfs.Fs.Symlink(pfNetUplinkPath, filepath.Join(NetSysDir, uplink.Name))
+		if err != nil {
+			return teardown
+		}
+		// and a symlink for the uplink device under /sys/class/net
+		err = utilfs.Fs.Symlink(filepath.Join(PciSysDir, uplinkPciAddress), filepath.Join(pfNetUplinkPath, "device"))
+		if err != nil {
+			return teardown
+		}
+
+		// create phys_port_name and phys_switch_id files for the uplink
+		if err = setUpRepPhysFiles(uplink); err != nil {
+			return teardown
+		}
 	}
 
 	for _, rep := range vfReps {
@@ -260,176 +269,196 @@ func setupRepresentorEnvForGetVfRepresentor(t *testing.T, uplink repContext, upl
 func TestGetVfRepresentor(t *testing.T) {
 	uplinkPciAddress := "0000:03:00.0"
 
-	tcases := []struct {
-		name             string
-		uplink           repContext
-		uplinkPciAddress string
-		vfReps           []repContext
-		vfIndex          int
-		expectedVFRep    string
-		shouldFail       bool
-		expectedErr      error
-	}{
-		{
-			name:             "VF representor found",
-			uplink:           repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
-			uplinkPciAddress: uplinkPciAddress,
-			vfReps: []repContext{
-				{Name: "eth0", PhysPortName: "pf0vf0", PhysSwitchID: "c2cfc60003a1420c"},
-				{Name: "eth1", PhysPortName: "pf0vf1", PhysSwitchID: "c2cfc60003a1420c"},
-				{Name: "eth2", PhysPortName: "pf0vf2", PhysSwitchID: "c2cfc60003a1420c"},
-			},
-			vfIndex:       2,
-			expectedVFRep: "eth2",
-			shouldFail:    false,
-		},
-		{
-			name:             "VF representor not found - index doesn't exist",
-			uplink:           repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
-			uplinkPciAddress: uplinkPciAddress,
-			vfReps: []repContext{
-				{Name: "eth0", PhysPortName: "pf0vf0", PhysSwitchID: "c2cfc60003a1420c"},
-				{Name: "eth1", PhysPortName: "pf0vf1", PhysSwitchID: "c2cfc60003a1420c"},
-				{Name: "eth2", PhysPortName: "pf0vf2", PhysSwitchID: "c2cfc60003a1420c"},
-			},
-			vfIndex:       5,
-			expectedVFRep: "",
-			shouldFail:    true,
-			expectedErr:   ErrRepresentorNotFound,
-		},
-		{
-			name:             "VF representor not found - no representors",
-			uplink:           repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
-			uplinkPciAddress: uplinkPciAddress,
-			vfReps:           nil,
-			vfIndex:          0,
-			expectedVFRep:    "",
-			shouldFail:       true,
-			expectedErr:      ErrRepresentorNotFound,
-		},
-		{
-			name:             "VF representor not found - invalid phys_port_name",
-			uplink:           repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
-			uplinkPciAddress: uplinkPciAddress,
-			vfReps: []repContext{
-				{Name: "eth0", PhysPortName: "invalid", PhysSwitchID: "c2cfc60003a1420c"},
-				{Name: "eth1", PhysPortName: "pf0sf1", PhysSwitchID: "c2cfc60003a1420c"}, // SF instead of VF
-			},
-			vfIndex:       0,
-			expectedVFRep: "",
-			shouldFail:    true,
-			expectedErr:   ErrRepresentorNotFound,
-		},
-		{
-			name:             "VF representor not found - missing phys_port_name",
-			uplink:           repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
-			uplinkPciAddress: uplinkPciAddress,
-			vfReps: []repContext{
-				{Name: "eth0", PhysPortName: "", PhysSwitchID: "c2cfc60003a1420c"}, // No phys_port_name
-				{Name: "eth1", PhysPortName: "pf0vf1", PhysSwitchID: "c2cfc60003a1420c"},
-			},
-			vfIndex:       0,
-			expectedVFRep: "",
-			shouldFail:    true,
-			expectedErr:   ErrRepresentorNotFound,
-		},
-		{
-			name:             "uplink is not switchdev",
-			uplink:           repContext{Name: "eth0", PhysPortName: "", PhysSwitchID: ""},
-			uplinkPciAddress: uplinkPciAddress,
-			vfReps:           []repContext{},
-			vfIndex:          0,
-			expectedVFRep:    "",
-			shouldFail:       true,
-		},
-		{
-			name:             "VF representor found with mixed representors",
-			uplink:           repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
-			uplinkPciAddress: uplinkPciAddress,
-			vfReps: []repContext{
-				{Name: "eth0", PhysPortName: "invalid", PhysSwitchID: "c2cfc60003a1420c"}, // Invalid
-				{Name: "eth1", PhysPortName: "pf0vf0", PhysSwitchID: "c2cfc60003a1420c"},
-				{Name: "eth2", PhysPortName: "pf0sf1", PhysSwitchID: "c2cfc60003a1420c"}, // SF rep
-				{Name: "eth3", PhysPortName: "pf0vf2", PhysSwitchID: "c2cfc60003a1420c"},
-			},
-			vfIndex:       2,
-			expectedVFRep: "eth3",
-			shouldFail:    false,
-		},
-		{
-			name:             "VF representor found - mixed external representor",
-			uplink:           repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
-			uplinkPciAddress: uplinkPciAddress,
-			vfReps: []repContext{
-				{Name: "eth2", PhysPortName: "c1pf0vf1", PhysSwitchID: "c2cfc60003a1420c"},
-				{Name: "eth3", PhysPortName: "c1pf0vf2", PhysSwitchID: "c2cfc60003a1420c"},
-				{Name: "eth4", PhysPortName: "pf0vf1", PhysSwitchID: "c2cfc60003a1420c"},
-				{Name: "eth5", PhysPortName: "pf0vf2", PhysSwitchID: "c2cfc60003a1420c"},
-			},
-			vfIndex:       2,
-			expectedVFRep: "eth5",
-			shouldFail:    false,
-		},
-		{
-			name:             "VF representor not found - only external representor",
-			uplink:           repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
-			uplinkPciAddress: uplinkPciAddress,
-			vfReps: []repContext{
-				{Name: "eth2", PhysPortName: "c1pf0vf1", PhysSwitchID: "c2cfc60003a1420c"},
-				{Name: "eth3", PhysPortName: "c1pf0vf2", PhysSwitchID: "c2cfc60003a1420c"},
-			},
-			vfIndex:       2,
-			expectedVFRep: "",
-			shouldFail:    true,
-			expectedErr:   ErrRepresentorNotFound,
-		},
-	}
-
-	for _, tcase := range tcases {
-		t.Run(tcase.name, func(t *testing.T) {
-			// mock netlink calls, trigger failure to fallback to sysfs
-			nlOpsMock := netlinkopsMocks.NewMockNetlinkOps(t)
-			netlinkops.SetNetlinkOps(nlOpsMock)
-			defer netlinkops.ResetNetlinkOps()
-			nlOpsMock.On("DevLinkGetDevicePortList", mock.AnythingOfType("string"), mock.AnythingOfType("string")).Return(
-				nil, fmt.Errorf("failed to get devlink ports")).Maybe()
-
-			teardown := setupRepresentorEnvForGetVfRepresentor(t, tcase.uplink, tcase.uplinkPciAddress, tcase.vfReps)
-			defer teardown()
-			vfRep, err := GetVfRepresentor(tcase.uplink.Name, tcase.vfIndex)
-			if tcase.shouldFail {
-				assert.Error(t, err)
-				if tcase.expectedErr != nil {
-					assert.ErrorIs(t, err, tcase.expectedErr)
-				}
-			} else {
-				assert.NoError(t, err)
-				assert.Equal(t, tcase.expectedVFRep, vfRep)
-			}
-		})
-	}
-
-	// Test with devlink ports available
-	t.Run("returns representor from devlink", func(t *testing.T) {
-		// setup representor env
-		teardown := setupRepresentorEnvForGetVfRepresentor(
-			t,
-			repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "111111"}, uplinkPciAddress,
-			nil)
-		defer teardown()
-
-		nlOpsMock := netlinkopsMocks.NewMockNetlinkOps(t)
-		netlinkops.SetNetlinkOps(nlOpsMock)
-		defer netlinkops.ResetNetlinkOps()
-
-		devlinkPorts := []*netlink.DevlinkPort{
-			// uplink port
+	t.Run("Get VF representor from sysfs", func(t *testing.T) {
+		tcases := []struct {
+			name             string
+			uplinkPciAddress string
+			uplink           *repContext
+			vfReps           []repContext
+			vfIndex          int
+			expectedVFRep    string
+			shouldFail       bool
+			expectedErr      error
+		}{
 			{
-				NetdeviceName:    "p0",
-				PortFlavour:      uint16(PORT_FLAVOUR_PHYSICAL),
-				ControllerNumber: ptrTo(uint32(0)),
-				PortNumber:       ptrTo(uint32(0)),
+				name:             "VF representor found",
+				uplinkPciAddress: uplinkPciAddress,
+				uplink:           &repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
+				vfReps: []repContext{
+					{Name: "eth0", PhysPortName: "pf0vf0", PhysSwitchID: "c2cfc60003a1420c"},
+					{Name: "eth1", PhysPortName: "pf0vf1", PhysSwitchID: "c2cfc60003a1420c"},
+					{Name: "eth2", PhysPortName: "pf0vf2", PhysSwitchID: "c2cfc60003a1420c"},
+				},
+				vfIndex:       2,
+				expectedVFRep: "eth2",
+				shouldFail:    false,
 			},
+			{
+				name:             "VF representor found - uplink not present, PCI address provided",
+				uplinkPciAddress: uplinkPciAddress,
+				vfReps: []repContext{
+					{Name: "eth0", PhysPortName: "pf0vf0", PhysSwitchID: "c2cfc60003a1420c"},
+					{Name: "eth1", PhysPortName: "pf0vf1", PhysSwitchID: "c2cfc60003a1420c"},
+					{Name: "eth2", PhysPortName: "pf0vf2", PhysSwitchID: "c2cfc60003a1420c"},
+				},
+				vfIndex:       2,
+				expectedVFRep: "eth2",
+				shouldFail:    false,
+			},
+			{
+				name:             "VF representor not found - index doesn't exist",
+				uplinkPciAddress: uplinkPciAddress,
+				uplink:           &repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
+				vfReps: []repContext{
+					{Name: "eth0", PhysPortName: "pf0vf0", PhysSwitchID: "c2cfc60003a1420c"},
+					{Name: "eth1", PhysPortName: "pf0vf1", PhysSwitchID: "c2cfc60003a1420c"},
+					{Name: "eth2", PhysPortName: "pf0vf2", PhysSwitchID: "c2cfc60003a1420c"},
+				},
+				vfIndex:       5,
+				expectedVFRep: "",
+				shouldFail:    true,
+				expectedErr:   ErrRepresentorNotFound,
+			},
+			{
+				name:             "VF representor not found - no representors",
+				uplinkPciAddress: uplinkPciAddress,
+				uplink:           &repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
+				vfReps:           nil,
+				vfIndex:          0,
+				expectedVFRep:    "",
+				shouldFail:       true,
+			},
+			{
+				name:             "VF representor not found - no representors and no uplink",
+				uplinkPciAddress: uplinkPciAddress,
+				vfReps:           nil,
+				vfIndex:          0,
+				expectedVFRep:    "",
+				shouldFail:       true,
+				expectedErr:      ErrRepresentorNotFound,
+			},
+			{
+				name:             "VF representor not found - invalid phys_port_name",
+				uplinkPciAddress: uplinkPciAddress,
+				uplink:           &repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
+				vfReps: []repContext{
+					{Name: "eth0", PhysPortName: "invalid", PhysSwitchID: "c2cfc60003a1420c"},
+					{Name: "eth1", PhysPortName: "pf0sf1", PhysSwitchID: "c2cfc60003a1420c"}, // SF instead of VF
+				},
+				vfIndex:       0,
+				expectedVFRep: "",
+				shouldFail:    true,
+				expectedErr:   ErrRepresentorNotFound,
+			},
+			{
+				name:             "VF representor not found - missing phys_port_name",
+				uplinkPciAddress: uplinkPciAddress,
+				uplink:           &repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
+				vfReps: []repContext{
+					{Name: "eth0", PhysPortName: "", PhysSwitchID: "c2cfc60003a1420c"}, // No phys_port_name
+					{Name: "eth1", PhysPortName: "pf0vf1", PhysSwitchID: "c2cfc60003a1420c"},
+				},
+				vfIndex:       0,
+				expectedVFRep: "",
+				shouldFail:    true,
+				expectedErr:   ErrRepresentorNotFound,
+			},
+			{
+				name:             "uplink is not switchdev",
+				uplinkPciAddress: uplinkPciAddress,
+				uplink:           &repContext{Name: "eth0", PhysPortName: "", PhysSwitchID: ""},
+				vfReps:           []repContext{},
+				vfIndex:          0,
+				expectedVFRep:    "",
+				shouldFail:       true,
+			},
+			{
+				name:             "VF representor found with mixed representors",
+				uplinkPciAddress: uplinkPciAddress,
+				uplink:           &repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
+				vfReps: []repContext{
+					{Name: "eth0", PhysPortName: "invalid", PhysSwitchID: "c2cfc60003a1420c"}, // Invalid
+					{Name: "eth1", PhysPortName: "pf0vf0", PhysSwitchID: "c2cfc60003a1420c"},
+					{Name: "eth2", PhysPortName: "pf0sf1", PhysSwitchID: "c2cfc60003a1420c"}, // SF rep
+					{Name: "eth3", PhysPortName: "pf0vf2", PhysSwitchID: "c2cfc60003a1420c"},
+				},
+				vfIndex:       2,
+				expectedVFRep: "eth3",
+				shouldFail:    false,
+			},
+			{
+				name:             "VF representor found - mixed external representor",
+				uplinkPciAddress: uplinkPciAddress,
+				uplink:           &repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
+				vfReps: []repContext{
+					{Name: "eth2", PhysPortName: "c1pf0vf1", PhysSwitchID: "c2cfc60003a1420c"},
+					{Name: "eth3", PhysPortName: "c1pf0vf2", PhysSwitchID: "c2cfc60003a1420c"},
+					{Name: "eth4", PhysPortName: "pf0vf1", PhysSwitchID: "c2cfc60003a1420c"},
+					{Name: "eth5", PhysPortName: "pf0vf2", PhysSwitchID: "c2cfc60003a1420c"},
+				},
+				vfIndex:       2,
+				expectedVFRep: "eth5",
+				shouldFail:    false,
+			},
+			{
+				name:             "VF representor not found - only external representor",
+				uplinkPciAddress: uplinkPciAddress,
+				uplink:           &repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
+				vfReps: []repContext{
+					{Name: "eth2", PhysPortName: "c1pf0vf1", PhysSwitchID: "c2cfc60003a1420c"},
+					{Name: "eth3", PhysPortName: "c1pf0vf2", PhysSwitchID: "c2cfc60003a1420c"},
+				},
+				vfIndex:       2,
+				expectedVFRep: "",
+				shouldFail:    true,
+			},
+		}
+
+		for _, tcase := range tcases {
+			t.Run(tcase.name, func(t *testing.T) {
+				// mock netlink calls, trigger failure to fallback to sysfs
+				nlOpsMock := netlinkopsMocks.NewMockNetlinkOps(t)
+				netlinkops.SetNetlinkOps(nlOpsMock)
+				defer netlinkops.ResetNetlinkOps()
+				nlOpsMock.On("DevLinkGetDevicePortList", mock.AnythingOfType("string"), mock.AnythingOfType("string")).Return(
+					nil, fmt.Errorf("failed to get devlink ports")).Maybe()
+
+				teardown := setupRepresentorEnvForGetVfRepresentor(t, tcase.uplinkPciAddress, tcase.uplink, tcase.vfReps)
+				defer teardown()
+
+				var vfRep string
+				var err error
+
+				if tcase.uplink == nil {
+					// use uplink PCI address if no uplink netdev
+					vfRep, err = GetVfRepresentor(tcase.uplinkPciAddress, tcase.vfIndex)
+				} else {
+					// use uplink netdev name if provided
+					vfRep, err = GetVfRepresentor(tcase.uplink.Name, tcase.vfIndex)
+				}
+
+				if tcase.shouldFail {
+					assert.Error(t, err)
+					if tcase.expectedErr != nil {
+						assert.ErrorIs(t, err, tcase.expectedErr)
+					}
+				} else {
+					assert.NoError(t, err)
+					assert.Equal(t, tcase.expectedVFRep, vfRep)
+				}
+			})
+		}
+	})
+
+	t.Run("Get VF representor from devlink", func(t *testing.T) {
+		// Test with devlink ports available
+		uplinkPhysDevlinkPort := &netlink.DevlinkPort{
+			NetdeviceName:    "p0",
+			PortFlavour:      uint16(PORT_FLAVOUR_PHYSICAL),
+			ControllerNumber: ptrTo(uint32(0)),
+			PortNumber:       ptrTo(uint32(0)),
+		}
+		vfDevlinkPorts := []*netlink.DevlinkPort{
 			// vf0 port
 			{
 				NetdeviceName:    "pf0vf0",
@@ -453,11 +482,47 @@ func TestGetVfRepresentor(t *testing.T) {
 			},
 		}
 
-		nlOpsMock.On("DevLinkGetDevicePortList", "pci", "0000:03:00.0").Return(
-			devlinkPorts, nil)
-		vfRep, err := GetVfRepresentor("p0", 1)
-		assert.NoError(t, err)
-		assert.Equal(t, "pf0vf1", vfRep)
+		tcases := []struct {
+			name             string
+			uplinkPciAddress string
+			uplink           *repContext
+			devlinkPorts     []*netlink.DevlinkPort
+			uplinkArg        string
+		}{
+			{
+				name:             "uplink representor present",
+				uplinkPciAddress: uplinkPciAddress,
+				uplink:           &repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "111111"},
+				devlinkPorts:     append([]*netlink.DevlinkPort{uplinkPhysDevlinkPort}, vfDevlinkPorts...),
+				uplinkArg:        "p0",
+			},
+			{
+				name:             "no uplink representor",
+				uplinkPciAddress: uplinkPciAddress,
+				uplink:           nil,
+				devlinkPorts:     vfDevlinkPorts,
+				uplinkArg:        uplinkPciAddress,
+			},
+		}
+
+		for _, tc := range tcases {
+			t.Run(tc.name, func(t *testing.T) {
+				teardown := setupRepresentorEnvForGetVfRepresentor(t, uplinkPciAddress, tc.uplink, nil)
+				defer teardown()
+
+				nlOpsMock := netlinkopsMocks.NewMockNetlinkOps(t)
+				netlinkops.SetNetlinkOps(nlOpsMock)
+				defer netlinkops.ResetNetlinkOps()
+
+				nlOpsMock.On("DevLinkGetDevicePortList", "pci", uplinkPciAddress).Return(
+					tc.devlinkPorts, nil)
+
+				vfRep, err := GetVfRepresentor(tc.uplinkArg, 1)
+				assert.NoError(t, err)
+				assert.Equal(t, "pf0vf1", vfRep)
+			})
+		}
+
 	})
 
 	// Test edge case: uplink directory doesn't exist (filesystem error)
@@ -921,157 +986,183 @@ func TestGetPfRepresentorDPU(t *testing.T) {
 func TestGetSfRepresentor(t *testing.T) {
 	uplinkPciAddress := "0000:03:00.0"
 
-	tcases := []struct {
-		name             string
-		uplink           repContext
-		uplinkPciAddress string
-		sfReps           []repContext
-		uplinkToCall     string
-		sfIndex          int
-		expectedSFRep    string
-		shouldFail       bool
-		expectedErr      error
-	}{
-		{
-			name:             "Local SFs only",
-			uplink:           repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
-			uplinkPciAddress: uplinkPciAddress,
-			sfReps: []repContext{
-				{Name: "eth0", PhysPortName: "pf0sf0", PhysSwitchID: "c2cfc60003a1420c"},
-				{Name: "eth1", PhysPortName: "pf0sf1", PhysSwitchID: "c2cfc60003a1420c"},
-				{Name: "eth2", PhysPortName: "pf0sf2", PhysSwitchID: "c2cfc60003a1420c"},
+	t.Run("Get SF representor from sysfs", func(t *testing.T) {
+		tcases := []struct {
+			name             string
+			uplinkPciAddress string
+			uplink           *repContext
+			sfReps           []repContext
+			uplinkArg        string
+			sfIndex          int
+			expectedSFRep    string
+			shouldFail       bool
+			expectedErr      error
+		}{
+			{
+				name:             "Local SFs only",
+				uplinkPciAddress: uplinkPciAddress,
+				uplink:           &repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
+				sfReps: []repContext{
+					{Name: "eth0", PhysPortName: "pf0sf0", PhysSwitchID: "c2cfc60003a1420c"},
+					{Name: "eth1", PhysPortName: "pf0sf1", PhysSwitchID: "c2cfc60003a1420c"},
+					{Name: "eth2", PhysPortName: "pf0sf2", PhysSwitchID: "c2cfc60003a1420c"},
+				},
+				uplinkArg:     "p0",
+				sfIndex:       2,
+				expectedSFRep: "eth2",
+				shouldFail:    false,
 			},
-			uplinkToCall:  "p0",
-			sfIndex:       2,
-			expectedSFRep: "eth2",
-			shouldFail:    false,
-		},
-		{
-			name:             "Local SFs and External SFs, should return local SF representor",
-			uplink:           repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
-			uplinkPciAddress: uplinkPciAddress,
-			sfReps: []repContext{
-				{Name: "eth0", PhysPortName: "pf0sf0", PhysSwitchID: "c2cfc60003a1420c"},
-				{Name: "eth1", PhysPortName: "pf0sf1", PhysSwitchID: "c2cfc60003a1420c"},
-				{Name: "eth2", PhysPortName: "c1pf0sf2", PhysSwitchID: "c2cfc60003a1420c"},
-				{Name: "eth3", PhysPortName: "pf0sf2", PhysSwitchID: "c2cfc60003a1420c"},
+			{
+				name:             "Local SFs and External SFs, should return local SF representor",
+				uplinkPciAddress: uplinkPciAddress,
+				uplink:           &repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
+				sfReps: []repContext{
+					{Name: "eth0", PhysPortName: "pf0sf0", PhysSwitchID: "c2cfc60003a1420c"},
+					{Name: "eth1", PhysPortName: "pf0sf1", PhysSwitchID: "c2cfc60003a1420c"},
+					{Name: "eth2", PhysPortName: "c1pf0sf2", PhysSwitchID: "c2cfc60003a1420c"},
+					{Name: "eth3", PhysPortName: "pf0sf2", PhysSwitchID: "c2cfc60003a1420c"},
+				},
+				uplinkArg:     "p0",
+				sfIndex:       2,
+				expectedSFRep: "eth3",
+				shouldFail:    false,
 			},
-			uplinkToCall:  "p0",
-			sfIndex:       2,
-			expectedSFRep: "eth3",
-			shouldFail:    false,
-		},
-		{
-			name:             "SF rep no found",
-			uplink:           repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
-			uplinkPciAddress: uplinkPciAddress,
-			sfReps: []repContext{
-				{Name: "eth0", PhysPortName: "pf0sf0", PhysSwitchID: "c2cfc60003a1420c"},
-				{Name: "eth1", PhysPortName: "pf0sf1", PhysSwitchID: "c2cfc60003a1420c"},
-				{Name: "eth2", PhysPortName: "c1pf0sf2", PhysSwitchID: "c2cfc60003a1420c"},
+			{
+				name:             "Local SFs and External SFs, should return local SF representor - no uplink",
+				uplinkPciAddress: uplinkPciAddress,
+				sfReps: []repContext{
+					{Name: "eth0", PhysPortName: "pf0sf0", PhysSwitchID: "c2cfc60003a1420c"},
+					{Name: "eth1", PhysPortName: "pf0sf1", PhysSwitchID: "c2cfc60003a1420c"},
+					{Name: "eth2", PhysPortName: "c1pf0sf2", PhysSwitchID: "c2cfc60003a1420c"},
+					{Name: "eth3", PhysPortName: "pf0sf2", PhysSwitchID: "c2cfc60003a1420c"},
+				},
+				uplinkArg:     uplinkPciAddress,
+				sfIndex:       2,
+				expectedSFRep: "eth3",
+				shouldFail:    false,
 			},
-			uplinkToCall:  "p0",
-			sfIndex:       2,
-			expectedSFRep: "",
-			shouldFail:    true,
-			expectedErr:   ErrRepresentorNotFound,
-		},
-		{
-			name:             "SF rep no found no reps",
-			uplink:           repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
-			uplinkPciAddress: uplinkPciAddress,
-			sfReps:           []repContext{},
-			uplinkToCall:     "p0",
-			sfIndex:          2,
-			expectedSFRep:    "",
-			shouldFail:       true,
-			expectedErr:      ErrRepresentorNotFound,
-		},
-		{
-			name:             "SF rep no found only external reps",
-			uplink:           repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
-			uplinkPciAddress: uplinkPciAddress,
-			sfReps: []repContext{
-				{Name: "eth0", PhysPortName: "c1pf0sf0", PhysSwitchID: "c2cfc60003a1420c"},
-				{Name: "eth1", PhysPortName: "c1pf0sf1", PhysSwitchID: "c2cfc60003a1420c"},
-				{Name: "eth2", PhysPortName: "c1pf0sf2", PhysSwitchID: "c2cfc60003a1420c"},
+			{
+				name:             "SF rep no found",
+				uplinkPciAddress: uplinkPciAddress,
+				uplink:           &repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
+				sfReps: []repContext{
+					{Name: "eth0", PhysPortName: "pf0sf0", PhysSwitchID: "c2cfc60003a1420c"},
+					{Name: "eth1", PhysPortName: "pf0sf1", PhysSwitchID: "c2cfc60003a1420c"},
+					{Name: "eth2", PhysPortName: "c1pf0sf2", PhysSwitchID: "c2cfc60003a1420c"},
+				},
+				uplinkArg:     "p0",
+				sfIndex:       2,
+				expectedSFRep: "",
+				shouldFail:    true,
+				expectedErr:   ErrRepresentorNotFound,
 			},
-			uplinkToCall:  "p0",
-			sfIndex:       2,
-			expectedSFRep: "",
-			shouldFail:    true,
-			expectedErr:   ErrRepresentorNotFound,
-		},
-		{
-			name:             "SF rep no found sf index not found",
-			uplink:           repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
-			uplinkPciAddress: uplinkPciAddress,
-			sfReps: []repContext{
-				{Name: "eth0", PhysPortName: "c1pf0sf0", PhysSwitchID: "c2cfc60003a1420c"},
-				{Name: "eth1", PhysPortName: "pf0sf1", PhysSwitchID: "c2cfc60003a1420c"},
+			{
+				name:             "SF rep no found - no uplink",
+				uplinkPciAddress: uplinkPciAddress,
+				sfReps: []repContext{
+					{Name: "eth0", PhysPortName: "pf0sf0", PhysSwitchID: "c2cfc60003a1420c"},
+					{Name: "eth1", PhysPortName: "pf0sf1", PhysSwitchID: "c2cfc60003a1420c"},
+					{Name: "eth2", PhysPortName: "c1pf0sf2", PhysSwitchID: "c2cfc60003a1420c"},
+				},
+				uplinkArg:     uplinkPciAddress,
+				sfIndex:       2,
+				expectedSFRep: "",
+				shouldFail:    true,
+				expectedErr:   ErrRepresentorNotFound,
 			},
-			uplinkToCall:  "p0",
-			sfIndex:       3,
-			expectedSFRep: "",
-			shouldFail:    true,
-			expectedErr:   ErrRepresentorNotFound,
-		},
-		{
-			name:             "SF rep not found - no uplink",
-			uplink:           repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
-			uplinkPciAddress: uplinkPciAddress,
-			sfReps:           nil,
-			uplinkToCall:     "p1",
-			sfIndex:          3,
-			expectedSFRep:    "",
-			shouldFail:       true,
-		},
-	}
+			{
+				name:             "SF rep no found no reps",
+				uplinkPciAddress: uplinkPciAddress,
+				uplink:           &repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
+				sfReps:           []repContext{},
+				uplinkArg:        "p0",
+				sfIndex:          2,
+				expectedSFRep:    "",
+				shouldFail:       true,
+			},
+			{
+				name:             "SF rep no found only external reps",
+				uplinkPciAddress: uplinkPciAddress,
+				uplink:           &repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
+				sfReps: []repContext{
+					{Name: "eth0", PhysPortName: "c1pf0sf0", PhysSwitchID: "c2cfc60003a1420c"},
+					{Name: "eth1", PhysPortName: "c1pf0sf1", PhysSwitchID: "c2cfc60003a1420c"},
+					{Name: "eth2", PhysPortName: "c1pf0sf2", PhysSwitchID: "c2cfc60003a1420c"},
+				},
+				uplinkArg:     "p0",
+				sfIndex:       2,
+				expectedSFRep: "",
+				shouldFail:    true,
+				expectedErr:   ErrRepresentorNotFound,
+			},
+			{
+				name:             "SF rep no found sf index not found",
+				uplinkPciAddress: uplinkPciAddress,
+				uplink:           &repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
+				sfReps: []repContext{
+					{Name: "eth0", PhysPortName: "c1pf0sf0", PhysSwitchID: "c2cfc60003a1420c"},
+					{Name: "eth1", PhysPortName: "pf0sf1", PhysSwitchID: "c2cfc60003a1420c"},
+				},
+				uplinkArg:     "p0",
+				sfIndex:       3,
+				expectedSFRep: "",
+				shouldFail:    true,
+				expectedErr:   ErrRepresentorNotFound,
+			},
+			{
+				name:             "SF rep not found - no uplink",
+				uplinkPciAddress: uplinkPciAddress,
+				uplink:           &repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
+				sfReps:           nil,
+				uplinkArg:        "p1",
+				sfIndex:          3,
+				expectedSFRep:    "",
+				shouldFail:       true,
+			},
+		}
 
-	for _, tcase := range tcases {
-		t.Run(tcase.name, func(t *testing.T) {
-			// mock netlink calls, trigger failure to fallback to sysfs
-			nlOpsMock := netlinkopsMocks.NewMockNetlinkOps(t)
-			netlinkops.SetNetlinkOps(nlOpsMock)
-			defer netlinkops.ResetNetlinkOps()
-			nlOpsMock.On("DevLinkGetDevicePortList", mock.AnythingOfType("string"), mock.AnythingOfType("string")).Return(
-				nil, fmt.Errorf("failed to get devlink ports")).Maybe()
+		for _, tcase := range tcases {
+			t.Run(tcase.name, func(t *testing.T) {
+				// mock netlink calls, trigger failure to fallback to sysfs
+				nlOpsMock := netlinkopsMocks.NewMockNetlinkOps(t)
+				netlinkops.SetNetlinkOps(nlOpsMock)
+				defer netlinkops.ResetNetlinkOps()
+				nlOpsMock.On("DevLinkGetDevicePortList", mock.AnythingOfType("string"), mock.AnythingOfType("string")).Return(
+					nil, fmt.Errorf("failed to get devlink ports")).Maybe()
 
-			teardown := setupRepresentorEnvForGetVfRepresentor(t, tcase.uplink, tcase.uplinkPciAddress, tcase.sfReps)
-			defer teardown()
-			sfRep, err := GetSfRepresentor(tcase.uplinkToCall, tcase.sfIndex)
-			if tcase.shouldFail {
-				assert.Error(t, err)
-				if tcase.expectedErr != nil {
-					assert.ErrorIs(t, err, tcase.expectedErr)
+				teardown := setupRepresentorEnvForGetVfRepresentor(t, tcase.uplinkPciAddress, tcase.uplink, tcase.sfReps)
+				defer teardown()
+				sfRep, err := GetSfRepresentor(tcase.uplinkArg, tcase.sfIndex)
+				if tcase.shouldFail {
+					assert.Error(t, err)
+					if tcase.expectedErr != nil {
+						assert.ErrorIs(t, err, tcase.expectedErr)
+					}
+				} else {
+					assert.NoError(t, err)
+					assert.Equal(t, tcase.expectedSFRep, sfRep)
 				}
-			} else {
-				assert.NoError(t, err)
-				assert.Equal(t, tcase.expectedSFRep, sfRep)
-			}
-		})
-	}
+			})
+		}
+	})
 
-	// Test with devlink ports available
-	t.Run("returns representor from devlink", func(t *testing.T) {
+	t.Run("Get SF representor from devlink", func(t *testing.T) {
 		teardown := setupRepresentorEnvForGetVfRepresentor(
 			t,
-			repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
 			uplinkPciAddress,
+			&repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
 			nil)
 		defer teardown()
 
-		nlOpsMock := netlinkopsMocks.NewMockNetlinkOps(t)
-		netlinkops.SetNetlinkOps(nlOpsMock)
-		defer netlinkops.ResetNetlinkOps()
+		uplinkDevlinkPort := &netlink.DevlinkPort{
+			NetdeviceName:    "p0",
+			PortFlavour:      uint16(PORT_FLAVOUR_PHYSICAL),
+			ControllerNumber: ptrTo(uint32(0)),
+			PortNumber:       ptrTo(uint32(0)),
+		}
 
-		devlinkPorts := []*netlink.DevlinkPort{
-			{
-				NetdeviceName:    "p0",
-				PortFlavour:      uint16(PORT_FLAVOUR_PHYSICAL),
-				ControllerNumber: ptrTo(uint32(0)),
-				PortNumber:       ptrTo(uint32(0)),
-			},
+		//nolint:prealloc
+		repDevlinkPorts := []*netlink.DevlinkPort{
 			{
 				NetdeviceName:    "c1pf0sf10",
 				PortFlavour:      uint16(PORT_FLAVOUR_PCI_SF),
@@ -1091,12 +1182,52 @@ func TestGetSfRepresentor(t *testing.T) {
 				SfNumber:         ptrTo(uint32(10)),
 			},
 		}
-		nlOpsMock.On("DevLinkGetDevicePortList", "pci", "0000:03:00.0").Return(
-			devlinkPorts, nil)
 
-		sfRep, err := GetSfRepresentor("p0", 10)
-		assert.NoError(t, err)
-		assert.Equal(t, "pf0sf10", sfRep)
+		tcases := []struct {
+			name             string
+			uplinkPciAddress string
+			uplink           *repContext
+			devlinkPorts     []*netlink.DevlinkPort
+			uplinkArg        string
+			sfIndex          int
+			expectedSFRep    string
+		}{
+			{
+				name:             "uplink representor present",
+				uplinkPciAddress: uplinkPciAddress,
+				uplink:           &repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
+				devlinkPorts:     append(repDevlinkPorts, uplinkDevlinkPort),
+				uplinkArg:        "p0",
+				sfIndex:          10,
+				expectedSFRep:    "pf0sf10",
+			},
+			{
+				name:             "uplink representor not present",
+				uplinkPciAddress: uplinkPciAddress,
+				devlinkPorts:     repDevlinkPorts,
+				uplinkArg:        uplinkPciAddress,
+				sfIndex:          10,
+				expectedSFRep:    "pf0sf10",
+			},
+		}
+
+		for _, tcase := range tcases {
+			t.Run(tcase.name, func(t *testing.T) {
+
+				teardown := setupRepresentorEnvForGetVfRepresentor(t, uplinkPciAddress, tcase.uplink, nil)
+				defer teardown()
+
+				nlOpsMock := netlinkopsMocks.NewMockNetlinkOps(t)
+				netlinkops.SetNetlinkOps(nlOpsMock)
+				defer netlinkops.ResetNetlinkOps()
+				nlOpsMock.On("DevLinkGetDevicePortList", "pci", tcase.uplinkPciAddress).Return(
+					tcase.devlinkPorts, nil)
+
+				sfRep, err := GetSfRepresentor(tcase.uplinkArg, tcase.sfIndex)
+				assert.NoError(t, err)
+				assert.Equal(t, tcase.expectedSFRep, sfRep)
+			})
+		}
 	})
 }
 
