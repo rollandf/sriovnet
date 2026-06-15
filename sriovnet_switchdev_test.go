@@ -464,6 +464,7 @@ func TestGetVfRepresentor(t *testing.T) {
 				NetdeviceName:    "pf0vf0",
 				PortFlavour:      uint16(PORT_FLAVOUR_PCI_VF),
 				ControllerNumber: ptrTo(uint32(0)),
+				External:         ptrTo(false),
 				VfNumber:         ptrTo(uint16(0)),
 			},
 			// vf1 external port
@@ -471,6 +472,7 @@ func TestGetVfRepresentor(t *testing.T) {
 				NetdeviceName:    "c1pf0vf1",
 				PortFlavour:      uint16(PORT_FLAVOUR_PCI_VF),
 				ControllerNumber: ptrTo(uint32(1)),
+				External:         ptrTo(true),
 				VfNumber:         ptrTo(uint16(1)),
 			},
 			// vf1 port
@@ -478,6 +480,24 @@ func TestGetVfRepresentor(t *testing.T) {
 				NetdeviceName:    "pf0vf1",
 				PortFlavour:      uint16(PORT_FLAVOUR_PCI_VF),
 				ControllerNumber: ptrTo(uint32(0)),
+				External:         ptrTo(false),
+				VfNumber:         ptrTo(uint16(1)),
+			},
+		}
+
+		vfDevlinkPortsWithMultipleInternalControllers := []*netlink.DevlinkPort{
+			{
+				NetdeviceName:    "c0pf0vf0",
+				PortFlavour:      uint16(PORT_FLAVOUR_PCI_VF),
+				ControllerNumber: ptrTo(uint32(0)),
+				External:         ptrTo(false),
+				VfNumber:         ptrTo(uint16(1)),
+			},
+			{
+				NetdeviceName:    "c2pf0vf0",
+				PortFlavour:      uint16(PORT_FLAVOUR_PCI_VF),
+				ControllerNumber: ptrTo(uint32(2)),
+				External:         ptrTo(false),
 				VfNumber:         ptrTo(uint16(1)),
 			},
 		}
@@ -488,6 +508,10 @@ func TestGetVfRepresentor(t *testing.T) {
 			uplink           *repContext
 			devlinkPorts     []*netlink.DevlinkPort
 			uplinkArg        string
+			vfIndex          int
+			expectedVFRep    string
+			shouldFail       bool
+			expectedError    error
 		}{
 			{
 				name:             "uplink representor present",
@@ -495,6 +519,8 @@ func TestGetVfRepresentor(t *testing.T) {
 				uplink:           &repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "111111"},
 				devlinkPorts:     append([]*netlink.DevlinkPort{uplinkPhysDevlinkPort}, vfDevlinkPorts...),
 				uplinkArg:        "p0",
+				vfIndex:          1,
+				expectedVFRep:    "pf0vf1",
 			},
 			{
 				name:             "no uplink representor",
@@ -502,6 +528,18 @@ func TestGetVfRepresentor(t *testing.T) {
 				uplink:           nil,
 				devlinkPorts:     vfDevlinkPorts,
 				uplinkArg:        uplinkPciAddress,
+				vfIndex:          1,
+				expectedVFRep:    "pf0vf1",
+			},
+			{
+				name:             "multiple internal controllers",
+				uplinkPciAddress: uplinkPciAddress,
+				uplink:           nil,
+				devlinkPorts:     vfDevlinkPortsWithMultipleInternalControllers,
+				uplinkArg:        uplinkPciAddress,
+				vfIndex:          1,
+				shouldFail:       true,
+				expectedError:    ErrMultipleRepresentorsFound,
 			},
 		}
 
@@ -517,12 +555,42 @@ func TestGetVfRepresentor(t *testing.T) {
 				nlOpsMock.On("DevLinkGetDevicePortList", "pci", uplinkPciAddress).Return(
 					tc.devlinkPorts, nil)
 
-				vfRep, err := GetVfRepresentor(tc.uplinkArg, 1)
-				assert.NoError(t, err)
-				assert.Equal(t, "pf0vf1", vfRep)
+				vfRep, err := GetVfRepresentor(tc.uplinkArg, tc.vfIndex)
+				if tc.shouldFail {
+					assert.Error(t, err)
+					if tc.expectedError != nil {
+						assert.ErrorIs(t, err, tc.expectedError)
+					}
+				} else {
+					assert.NoError(t, err)
+					assert.Equal(t, tc.expectedVFRep, vfRep)
+				}
 			})
 		}
 
+		t.Run("local VF with non-zero controller", func(t *testing.T) {
+			teardown := setupRepresentorEnvForGetVfRepresentor(t, uplinkPciAddress, nil, nil)
+			defer teardown()
+
+			nlOpsMock := netlinkopsMocks.NewMockNetlinkOps(t)
+			netlinkops.SetNetlinkOps(nlOpsMock)
+			defer netlinkops.ResetNetlinkOps()
+
+			devlinkPorts := []*netlink.DevlinkPort{
+				{
+					NetdeviceName:    "pf0vf2",
+					PortFlavour:      uint16(PORT_FLAVOUR_PCI_VF),
+					ControllerNumber: ptrTo(uint32(5)),
+					External:         ptrTo(false),
+					VfNumber:         ptrTo(uint16(2)),
+				},
+			}
+			nlOpsMock.On("DevLinkGetDevicePortList", "pci", uplinkPciAddress).Return(devlinkPorts, nil)
+
+			vfRep, err := GetVfRepresentor(uplinkPciAddress, 2)
+			assert.NoError(t, err)
+			assert.Equal(t, "pf0vf2", vfRep)
+		})
 	})
 
 	// Test edge case: uplink directory doesn't exist (filesystem error)
@@ -1167,18 +1235,63 @@ func TestGetSfRepresentor(t *testing.T) {
 				NetdeviceName:    "c1pf0sf10",
 				PortFlavour:      uint16(PORT_FLAVOUR_PCI_SF),
 				ControllerNumber: ptrTo(uint32(1)),
+				External:         ptrTo(true),
 				SfNumber:         ptrTo(uint32(10)),
 			},
 			{
 				NetdeviceName:    "pf0vf10",
 				PortFlavour:      uint16(PORT_FLAVOUR_PCI_VF),
 				ControllerNumber: ptrTo(uint32(0)),
+				External:         ptrTo(false),
 				VfNumber:         ptrTo(uint16(10)),
 			},
 			{
 				NetdeviceName:    "pf0sf10",
 				PortFlavour:      uint16(PORT_FLAVOUR_PCI_SF),
 				ControllerNumber: ptrTo(uint32(0)),
+				External:         ptrTo(false),
+				SfNumber:         ptrTo(uint32(10)),
+			},
+		}
+
+		//nolint:prealloc
+		repDevlinkPortWithNonZeroController := []*netlink.DevlinkPort{
+			{
+				NetdeviceName:    "c1pf0sf10",
+				PortFlavour:      uint16(PORT_FLAVOUR_PCI_SF),
+				ControllerNumber: ptrTo(uint32(1)),
+				External:         ptrTo(true),
+				SfNumber:         ptrTo(uint32(10)),
+			},
+			{
+				NetdeviceName:    "pf0vf10",
+				PortFlavour:      uint16(PORT_FLAVOUR_PCI_VF),
+				ControllerNumber: ptrTo(uint32(2)),
+				External:         ptrTo(false),
+				VfNumber:         ptrTo(uint16(10)),
+			},
+			{
+				NetdeviceName:    "pf0sf10",
+				PortFlavour:      uint16(PORT_FLAVOUR_PCI_SF),
+				ControllerNumber: ptrTo(uint32(2)),
+				External:         ptrTo(false),
+				SfNumber:         ptrTo(uint32(10)),
+			},
+		}
+
+		repDevlinkPortsWithMultipleInternalControllers := []*netlink.DevlinkPort{
+			{
+				NetdeviceName:    "c0pf0sf10",
+				PortFlavour:      uint16(PORT_FLAVOUR_PCI_SF),
+				ControllerNumber: ptrTo(uint32(0)),
+				External:         ptrTo(false),
+				SfNumber:         ptrTo(uint32(10)),
+			},
+			{
+				NetdeviceName:    "c3pf0sf10",
+				PortFlavour:      uint16(PORT_FLAVOUR_PCI_SF),
+				ControllerNumber: ptrTo(uint32(3)),
+				External:         ptrTo(false),
 				SfNumber:         ptrTo(uint32(10)),
 			},
 		}
@@ -1191,6 +1304,8 @@ func TestGetSfRepresentor(t *testing.T) {
 			uplinkArg        string
 			sfIndex          int
 			expectedSFRep    string
+			shouldFail       bool
+			expectedError    error
 		}{
 			{
 				name:             "uplink representor present",
@@ -1202,12 +1317,31 @@ func TestGetSfRepresentor(t *testing.T) {
 				expectedSFRep:    "pf0sf10",
 			},
 			{
+				name:             "uplink representor present with non-zero controller",
+				uplinkPciAddress: uplinkPciAddress,
+				uplink:           &repContext{Name: "p0", PhysPortName: "p0", PhysSwitchID: "c2cfc60003a1420c"},
+				devlinkPorts:     append(repDevlinkPortWithNonZeroController, uplinkDevlinkPort),
+				uplinkArg:        "p0",
+				sfIndex:          10,
+				expectedSFRep:    "pf0sf10",
+			},
+			{
 				name:             "uplink representor not present",
 				uplinkPciAddress: uplinkPciAddress,
 				devlinkPorts:     repDevlinkPorts,
 				uplinkArg:        uplinkPciAddress,
 				sfIndex:          10,
 				expectedSFRep:    "pf0sf10",
+			},
+			{
+				name:             "multiple internal controllers",
+				uplinkPciAddress: uplinkPciAddress,
+				devlinkPorts:     repDevlinkPortsWithMultipleInternalControllers,
+				uplinkArg:        uplinkPciAddress,
+				sfIndex:          10,
+				expectedSFRep:    "",
+				shouldFail:       true,
+				expectedError:    ErrMultipleRepresentorsFound,
 			},
 		}
 
@@ -1224,8 +1358,15 @@ func TestGetSfRepresentor(t *testing.T) {
 					tcase.devlinkPorts, nil)
 
 				sfRep, err := GetSfRepresentor(tcase.uplinkArg, tcase.sfIndex)
-				assert.NoError(t, err)
-				assert.Equal(t, tcase.expectedSFRep, sfRep)
+				if tcase.shouldFail {
+					assert.Error(t, err)
+					if tcase.expectedError != nil {
+						assert.ErrorIs(t, err, tcase.expectedError)
+					}
+				} else {
+					assert.NoError(t, err)
+					assert.Equal(t, tcase.expectedSFRep, sfRep)
+				}
 			})
 		}
 	})

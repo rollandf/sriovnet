@@ -39,7 +39,7 @@ const (
 type PortFlavour uint16
 
 // Keep things consistent with netlink lib constants
-// nolint:revive,stylecheck
+// nolint:revive
 const (
 	PORT_FLAVOUR_PHYSICAL = iota
 	PORT_FLAVOUR_CPU
@@ -55,6 +55,8 @@ const (
 var (
 	// ErrRepresentorNotFound is returned when a representor is not found.
 	ErrRepresentorNotFound = errors.New("representor not found")
+	// ErrMultipleRepresentorsFound is returned when multiple representors are found.
+	ErrMultipleRepresentorsFound = errors.New("multiple representors found")
 )
 
 var (
@@ -74,7 +76,6 @@ var (
 
 func parseIndexFromPhysPortName(portName string, regex *regexp.Regexp) (pfRepIndex, vfRepIndex int, err error) {
 	matches := regex.FindStringSubmatch(portName)
-	//nolint:gomnd
 	if len(matches) != 3 {
 		err = fmt.Errorf("failed to parse portName %s", portName)
 	} else {
@@ -195,8 +196,17 @@ func GetUplinkRepresentor(pciAddress string) (string, error) {
 	return "", fmt.Errorf("failed to get uplink representor for %s: %w", pciAddress, ErrRepresentorNotFound)
 }
 
-// getRepresentorDevlink returns the representor netdev name for a given device, portflavor, controller number, index and  pf number(optional).
-func getRepresentorDevlink(deviceName string, flavor PortFlavour, controllerNumber uint32, index uint32, pfNum *uint16) (string, error) {
+// getRepresentorDevlink returns the representor netdev name for a given device.
+// The following attributes are used to find the matching devlink port:
+//
+//	portflavor: the devlink port flavor
+//	index: the PF/VF/SF index
+//	external(optional): whether or not the devlink port belongs to an external or local controller
+//	controllerNumber(optional): the controller number who owns the devlink port
+//	pfNum(optional): the PF number of the devlink port
+//
+// if more than one devlink port matches, error is returned.
+func getRepresentorDevlink(deviceName string, flavor PortFlavour, index uint32, external *bool, controllerNumber *uint32, pfNum *uint16) (string, error) {
 	// check for supported flavor
 	if flavor != PORT_FLAVOUR_PCI_VF && flavor != PORT_FLAVOUR_PCI_SF && flavor != PORT_FLAVOUR_PCI_PF {
 		return "", fmt.Errorf("unsupported flavor %d", flavor)
@@ -207,19 +217,44 @@ func getRepresentorDevlink(deviceName string, flavor PortFlavour, controllerNumb
 		return "", fmt.Errorf("failed to get devlink ports for pci device %s: %w", deviceName, err)
 	}
 
+	var repCandidates []string
 	for _, port := range ports {
-		// skip ports that are not of the given flavor
+		// filter according to the given flavor
 		if port.PortFlavour != uint16(flavor) {
 			continue
 		}
 
-		if port.ControllerNumber == nil || *port.ControllerNumber != controllerNumber {
-			continue
+		// filter according to the external attribute
+		if external != nil {
+			// if devlink port External is not present, assume it is false
+			portExternal := port.External != nil && *port.External
+			if portExternal != *external {
+				continue
+			}
 		}
 
-		// if pfNum is specified, check that the port pf number matches.
-		if pfNum != nil && (port.PfNumber == nil || *port.PfNumber != *pfNum) {
-			continue
+		// filter according to the controller number
+		if controllerNumber != nil {
+			// if devlink port ControllerNumber is not present, assume it is 0
+			portControllerNumber := uint32(0)
+			if port.ControllerNumber != nil {
+				portControllerNumber = *port.ControllerNumber
+			}
+			if *controllerNumber != portControllerNumber {
+				continue
+			}
+		}
+
+		// filter according to the pf number
+		if pfNum != nil {
+			// if devlink port PfNumber is not present, assume it is 0
+			portPfNumber := uint16(0)
+			if port.PfNumber != nil {
+				portPfNumber = *port.PfNumber
+			}
+			if portPfNumber != *pfNum {
+				continue
+			}
 		}
 
 		// get devlink port pf/sf/vf number
@@ -251,15 +286,44 @@ func getRepresentorDevlink(deviceName string, flavor PortFlavour, controllerNumb
 			return "", fmt.Errorf("unexpected result from netlink. devlink port of type %d has no netdevice name. pci/%s/%d", flavor, deviceName, port.PortIndex)
 		}
 
-		return port.NetdeviceName, nil
+		repCandidates = append(repCandidates, port.NetdeviceName)
 	}
 
-	return "", fmt.Errorf("failed to get representor via devlink: device %s, flavor %d, controller %d, index %d: %w",
-		deviceName, flavor, controllerNumber, index, ErrRepresentorNotFound)
+	getArgsFmt := func() string {
+		args := make([]string, 0, 6)
+		args = append(args, fmt.Sprintf("device=%s", deviceName))
+		args = append(args, fmt.Sprintf("flavor=%d", flavor))
+		args = append(args, fmt.Sprintf("index=%d", index))
+		args = append(args, fmt.Sprintf("external=%s", ptrAsStr(external)))
+		args = append(args, fmt.Sprintf("controllerNumber=%s", ptrAsStr(controllerNumber)))
+		args = append(args, fmt.Sprintf("pfNum=%s", ptrAsStr(pfNum)))
+
+		return strings.Join(args, ", ")
+	}
+
+	if len(repCandidates) == 0 {
+		return "", fmt.Errorf("failed to find representor for: %s. %w", getArgsFmt(), ErrRepresentorNotFound)
+	}
+
+	if len(repCandidates) > 1 {
+		return "", fmt.Errorf("failed to find representor for: %s. %w", getArgsFmt(), ErrMultipleRepresentorsFound)
+	}
+
+	return repCandidates[0], nil
+}
+
+func ptrAsStr[T any](ptr *T) string {
+	if ptr == nil {
+		return "nil"
+	}
+	return fmt.Sprintf("%v", *ptr)
 }
 
 // GetVfRepresentor returns the VF representor netdev name for a given uplink and vfIndex.
 // uplink can be a PCI address or a netdev name.
+// This function assumes that only a single local VF representor exists with the given vfIndex for a given uplink.
+//
+//nolint:dupl
 func GetVfRepresentor(uplink string, vfIndex int) (string, error) {
 	uplinkPCI, err := parseUplinkToPCIAddress(uplink)
 	if err != nil {
@@ -270,13 +334,19 @@ func GetVfRepresentor(uplink string, vfIndex int) (string, error) {
 		return "", fmt.Errorf("vfIndex %d is negative", vfIndex)
 	}
 
-	// try to get representor from devlink
-	representor, err := getRepresentorDevlink(uplinkPCI, PORT_FLAVOUR_PCI_VF, 0, uint32(vfIndex), nil)
+	// try to get local representor from devlink
+	external := false
+	representor, err := getRepresentorDevlink(uplinkPCI, PORT_FLAVOUR_PCI_VF, uint32(vfIndex), &external, nil, nil)
 	if err == nil {
 		return representor, nil
 	}
 
-	// try to get representor from phys_port_name
+	if errors.Is(err, ErrMultipleRepresentorsFound) {
+		// break early if multiple representors are found. fallback to sysfs will likely return an incorrect representor.
+		return "", err
+	}
+
+	// try to get representor from phys_port_name via sysfs
 
 	// representors of a specific uplinkare expected to be linked with the same device as the uplink
 	pfLinkPath := filepath.Join(PciSysDir, uplinkPCI, "net")
@@ -305,6 +375,9 @@ func GetVfRepresentor(uplink string, vfIndex int) (string, error) {
 
 // GetSfRepresentor returns the SF representor netdev name for a given uplink and sfIndex.
 // uplink can be a PCI address or a netdev name.
+// This function assumes that only a single local SF representor exists with the given sfNum for a given uplink.
+//
+//nolint:dupl
 func GetSfRepresentor(uplink string, sfNum int) (string, error) {
 	uplinkPCI, err := parseUplinkToPCIAddress(uplink)
 	if err != nil {
@@ -315,13 +388,19 @@ func GetSfRepresentor(uplink string, sfNum int) (string, error) {
 		return "", fmt.Errorf("sfNum %d is negative", sfNum)
 	}
 
-	// try to get representor from devlink
-	representor, err := getRepresentorDevlink(uplinkPCI, PORT_FLAVOUR_PCI_SF, 0, uint32(sfNum), nil)
+	// try to get local representor from devlink
+	external := false
+	representor, err := getRepresentorDevlink(uplinkPCI, PORT_FLAVOUR_PCI_SF, uint32(sfNum), &external, nil, nil)
 	if err == nil {
 		return representor, nil
 	}
 
-	// try to get representor from phys_port_name
+	if errors.Is(err, ErrMultipleRepresentorsFound) {
+		// break early if multiple representors are found. fallback to sysfs will likely return an incorrect representor.
+		return "", err
+	}
+
+	// try to get representor from phys_port_name via sysfs
 	pfNetPath := filepath.Join(PciSysDir, uplinkPCI, "net")
 	devices, err := utilfs.Fs.ReadDir(pfNetPath)
 	if err != nil {
